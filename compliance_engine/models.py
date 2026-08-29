@@ -15,6 +15,8 @@ class Status(str, Enum):
     COMPLIANT = "COMPLIANT"
     VIOLATION = "VIOLATION"
     UNABLE_TO_VERIFY = "UNABLE_TO_VERIFY"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    OFFICER_REVIEW_REQUIRED = "OFFICER_REVIEW_REQUIRED"
 
 
 class ObservationState(str, Enum):
@@ -126,6 +128,10 @@ class ComplianceResult:
     def overall_status(self) -> Status:
         if any(item.status is Status.VIOLATION for item in self.outcomes):
             return Status.VIOLATION
+        if any(item.status is Status.OFFICER_REVIEW_REQUIRED for item in self.outcomes):
+            return Status.OFFICER_REVIEW_REQUIRED
         if any(item.status is Status.UNABLE_TO_VERIFY for item in self.outcomes):
             return Status.UNABLE_TO_VERIFY
+        if any(item.status is Status.NOT_APPLICABLE for item in self.outcomes):
+            return Status.NOT_APPLICABLE
         return Status.COMPLIANT
