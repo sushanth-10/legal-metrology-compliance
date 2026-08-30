@@ -47,6 +47,11 @@ export interface GeneratedReport {
   location?: string;
   category?: string;
   imageUrl?: string;
+  report_id?: string;
+  scanDate?: string;
+  officerName?: string;
+  pdfUrl?: string;
+  extractedData?: Record<string, unknown>;
 }
 
 export type DeclarationKey =
@@ -98,6 +103,9 @@ export interface Scan {
   mrpMismatch?: boolean;
   category?: string;
   location?: string;
+  scan_id?: string;
+  extractedData?: Record<string, unknown>;
+  checks?: Array<{ id: string | number; label: string; status: string; value: string; reference: string; explanation: string; evidence?: string; confidence?: number | null }>;
 }
 
 export type ComplaintStatus = 'new' | 'review' | 'investigating' | 'resolved';

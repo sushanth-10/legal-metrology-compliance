@@ -71,6 +71,10 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Frontend source modules are not Python build artifacts.
+!project/src/lib/
+!project/src/lib/*.ts
+
 # PyBuilder
 .pybuilder/
 target/

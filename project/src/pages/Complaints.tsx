@@ -9,10 +9,8 @@ import {
   FileText,
   ArrowLeft,
   Link2,
-  Image as ImageIcon,
   CheckCircle2,
   Clock,
-  Search as SearchIcon,
 } from 'lucide-react';
 import { useApp } from '@/store';
 import { PageHeader, EmptyState } from '@/components/ui';

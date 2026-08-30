@@ -16,7 +16,8 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/store';
 import { Confidence } from '@/components/ui';
-import { buildScanReport, downloadReportAsPdf } from '@/lib/reporting';
+import { downloadReportAsPdf } from '@/lib/reporting';
+import { apiJson } from '@/lib/api';
 import type { ComplianceStatus, Declaration, BoundingBox, GeneratedReport } from '@/types';
 
 const statusConfig: Record<
@@ -123,7 +124,7 @@ function EvidenceImage({
 }
 
 export function Result({ onScanAnother }: { onScanAnother: () => void }) {
-  const { scans, selectedScanId, setPage, role, addReport, reports } = useApp();
+  const { scans, selectedScanId, setPage, role, addReport, reports, showToast } = useApp();
   const scan = scans.find((s) => s.id === selectedScanId) ?? scans[0];
   const [showMrp, setShowMrp] = useState(true);
   const [previewReport, setPreviewReport] = useState<GeneratedReport | null>(null);
@@ -137,15 +138,17 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
   const boxes = scan.declarations.map((d) => d.region).filter(Boolean) as BoundingBox[];
   const generatedReport = reports.find((report) => report.scanId === scan.id) ?? null;
 
-  const handleGeneratePdfReport = () => {
+  const handleGeneratePdfReport = async () => {
+    if (role !== 'officer') return;
     try {
-      const report = buildScanReport(scan);
+      const report = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(scan.id)}`, { method: 'POST' });
       addReport(report);
       setPreviewReport(report);
       setReportError(null);
+      showToast('success', 'Official PDF report generated and saved.');
     } catch (error) {
       console.error(error);
-      setReportError('Unable to generate the PDF report from the current scan result.');
+      setReportError(error instanceof Error ? error.message : 'Unable to generate the PDF report from the current scan result.');
     }
   };
 
@@ -384,8 +387,8 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
       {/* Actions */}
       <div className="flex flex-col sm:flex-row gap-3 pb-4">
         {role === 'officer' && (
-          <button onClick={handleGeneratePdfReport} className="btn-primary flex-1 py-3">
-            <FileText className="w-4 h-4" /> {generatedReport ? 'Generate Updated PDF' : 'Generate PDF Report'}
+          <button onClick={() => void handleGeneratePdfReport()} className="btn-primary flex-1 py-3">
+            <FileText className="w-4 h-4" /> {generatedReport ? 'Generate Updated PDF' : 'Generate Report'}
           </button>
         )}
         {generatedReport && (
@@ -394,7 +397,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
           </button>
         )}
         {generatedReport && (
-          <button onClick={() => downloadReportAsPdf(generatedReport)} className="btn-secondary flex-1 py-3">
+          <button onClick={() => void downloadReportAsPdf(generatedReport)} className="btn-secondary flex-1 py-3">
             <Save className="w-4 h-4" /> Download PDF
           </button>
         )}
@@ -466,7 +469,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
             </div>
 
             <div className="mt-5 flex flex-col sm:flex-row gap-3 justify-end">
-              <button onClick={() => downloadReportAsPdf(previewReport)} className="btn-primary py-2.5">
+              <button onClick={() => void downloadReportAsPdf(previewReport)} className="btn-primary py-2.5">
                 <Save className="w-4 h-4" /> Download PDF
               </button>
               <button onClick={() => setPreviewReport(null)} className="btn-secondary py-2.5">

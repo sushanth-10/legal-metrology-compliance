@@ -6,17 +6,14 @@ import {
   MapPin,
   User,
   BadgeCheck,
-  Eye,
-  EyeOff,
   LogIn,
 } from 'lucide-react';
 import { useApp } from '@/store';
 import { AuthShell, BrandPanel, Breadcrumbs, PasswordField, Captcha } from '@/components/Auth';
-import { mockCredentials } from '@/lib/validation';
 import type { Role } from '@/types';
 
 export function Login() {
-  const { login, navigate, showToast } = useApp();
+  const { authenticate, navigate, showToast } = useApp();
   const [role, setRole] = useState<Role>('consumer');
   const [id, setId] = useState('');
   const [password, setPassword] = useState('');
@@ -38,17 +35,9 @@ export function Login() {
       }
 
       setSubmitting(true);
-      setTimeout(() => {
-        const cred = mockCredentials[role];
-        if (id.trim() === cred.id && password === cred.password) {
-          login(role);
-        } else {
-          setSubmitting(false);
-          showToast('error', 'Invalid credentials. Try the demo credentials shown below.');
-        }
-      }, 600);
+      void authenticate(id.trim(), password, role).finally(() => setSubmitting(false));
     },
-    [role, id, password, captchaOk, login, showToast]
+    [role, id, password, captchaOk, authenticate, showToast]
   );
 
   const idLabel = role === 'officer' ? 'Officer ID' : 'Aadhaar / Registered ID';
@@ -169,9 +158,9 @@ export function Login() {
       <div className="mt-5 rounded-xl bg-brand-50 border border-brand-100 p-3.5 text-xs text-brand-800">
         <p className="font-semibold mb-1">Demo credentials</p>
         {role === 'consumer' ? (
-          <p>ID: <span className="font-mono">consumer@test.com</span> • Password: <span className="font-mono">password123</span></p>
+          <p>ID: <span className="font-mono">user123</span> • Password: <span className="font-mono">123456</span></p>
         ) : (
-          <p>ID: <span className="font-mono">OFFICER001</span> • Password: <span className="font-mono">password123</span></p>
+          <p>ID: <span className="font-mono">officer123</span> • Password: <span className="font-mono">123456</span></p>
         )}
       </div>
 

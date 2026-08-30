@@ -34,7 +34,7 @@ interface FormData {
 }
 
 export function ConsumerRegistration() {
-  const { navigate, login, showToast } = useApp();
+  const { navigate, register, showToast } = useApp();
   const [form, setForm] = useState<FormData>({
     fullName: '',
     mobile: '',
@@ -113,11 +113,7 @@ export function ConsumerRegistration() {
       return;
     }
     setSubmitting(true);
-    setTimeout(() => {
-      setSubmitting(false);
-      showToast('success', 'Account created successfully!');
-      login('consumer', form.fullName);
-    }, 800);
+    void register(form.email, form.password, form.fullName, form.email).finally(() => setSubmitting(false));
   };
 
   return (

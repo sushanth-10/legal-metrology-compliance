@@ -3,14 +3,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import dataclasses
+import uuid
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from google import genai
 from google.genai import types
+
+load_dotenv()
 
 from compliance_engine import (
     ComplianceEngine,
@@ -20,19 +26,160 @@ from compliance_engine import (
     PackageContext,
     QuantityBasis,
 )
-
-load_dotenv()
+from database import STORAGE_DIR, connect, create_token, create_user, init_db, iso_datetime, json_value, new_id, user_from_token, verify_password
+from pdf_reports import create_pdf
 
 app = FastAPI(title="NIRIKSHA Package Compliance API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
+
+class LoginRequest(BaseModel):
+    login_id: str
+    password: str
+    role: str | None = None
+
+
+class RegisterRequest(BaseModel):
+    login_id: str
+    password: str
+    name: str
+    email: str | None = None
+    role: str = "consumer"
+
+
+def _user_or_401(authorization: str | None) -> dict[str, Any]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Authentication is required.")
+    user = user_from_token(authorization[7:].strip())
+    if not user:
+        raise HTTPException(status_code=401, detail="Your session is invalid or has expired. Please sign in again.")
+    return user
+
+
+def _officer_or_403(authorization: str | None) -> dict[str, Any]:
+    user = _user_or_401(authorization)
+    if user["role"] != "officer":
+        raise HTTPException(status_code=403, detail="Only officers can generate or access official reports.")
+    return user
+
+
+def _field_record(observation: FieldObservation) -> dict[str, Any]:
+    return {
+        "status": observation.state.value,
+        "value": observation.value,
+        "confidence": observation.confidence,
+        "evidence": observation.evidence,
+    }
+
+
+def _package_data(package: ExtractedPackage) -> dict[str, Any]:
+    return json_value(dataclasses.asdict(package))
+
+
+def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+    extracted = scan.get("extracted_data") or {}
+    fields = extracted.get("fields") or {}
+    def field_value(name: str, fallback: str = "—") -> str:
+        item = fields.get(name) or {}
+        value = item.get("value") if isinstance(item, dict) else None
+        return str(value) if value not in (None, "") else fallback
+    def field_confidence(name: str) -> float:
+        item = fields.get(name) or {}
+        value = item.get("confidence") if isinstance(item, dict) else None
+        try:
+            return float(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
+    def detected(name: str) -> bool:
+        item = fields.get(name) or {}
+        return isinstance(item, dict) and item.get("status") == ObservationState.PRESENT.value and bool(item.get("value"))
+
+    declarations = [
+        {"key": "manufacturer", "label": "Manufacturer / Packer", "detected": detected("manufacturer"), "value": field_value("manufacturer"), "confidence": field_confidence("manufacturer")},
+        {"key": "productName", "label": "Product Name", "detected": detected("generic_name"), "value": field_value("generic_name"), "confidence": field_confidence("generic_name")},
+        {"key": "netQuantity", "label": "Net Quantity", "detected": detected("net_quantity"), "value": field_value("net_quantity"), "confidence": field_confidence("net_quantity")},
+        {"key": "mrp", "label": "MRP", "detected": detected("mrp"), "value": field_value("mrp"), "confidence": field_confidence("mrp")},
+        {"key": "manufactureDate", "label": "Date of Manufacture", "detected": detected("manufacture_or_pack_or_import_date"), "value": field_value("manufacture_or_pack_or_import_date"), "confidence": field_confidence("manufacture_or_pack_or_import_date")},
+        {"key": "consumerCare", "label": "Consumer Care Details", "detected": detected("consumer_care"), "value": field_value("consumer_care"), "confidence": field_confidence("consumer_care")},
+    ]
+    violations = [
+        {"id": item["id"], "title": item["label"], "explanation": item["explanation"], "requirement": item["reference"], "evidence": item["value"], "severity": "medium"}
+        for item in results if item["status"] == "VIOLATION"
+    ]
+    scanned_at = iso_datetime(scan["scanned_at"])
+    return {
+        "id": scan["scan_id"],
+        "scan_id": scan["scan_id"],
+        "product": scan.get("product_name") or "Product name unavailable",
+        "image": scan.get("image_ref") or "",
+        "date": scanned_at,
+        "status": {"COMPLIANT": "compliant", "VIOLATION": "non-compliant"}.get(scan["overall_status"], "needs-review"),
+        "violations": len(violations),
+        "declarations": declarations,
+        "violationList": violations,
+        "category": None,
+        "location": None,
+        "extractedData": extracted,
+        "checks": results,
+    }
+
+
+def _result_rows(cursor: Any, scan_id: str) -> list[dict[str, Any]]:
+    cursor.execute("SELECT * FROM compliance_results WHERE scan_id = %s ORDER BY id", (scan_id,))
+    rows = cursor.fetchall()
+    return [
+        {
+            "id": row["id"],
+            "label": row["check_name"],
+            "status": row["status"],
+            "value": row.get("extracted_value") or "Evidence unavailable for this assessment",
+            "reference": row.get("applicable_requirement") or "Unavailable",
+            "explanation": row["explanation"],
+            "evidence": row.get("evidence") or "Evidence unavailable for this assessment",
+            "confidence": float(row["confidence"]) if row.get("confidence") is not None else None,
+            "sourceImage": row.get("source_image"),
+        }
+        for row in rows
+    ]
+
+
+def _get_scan(scan_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM scans WHERE scan_id = %s", (scan_id,))
+            scan = cursor.fetchone()
+            if not scan or (user["role"] != "officer" and scan["user_id"] != user["id"]):
+                return None
+            return _scan_dto(scan, _result_rows(cursor, scan_id))
+
+
+def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "total": len(checks),
+        "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"),
+        "violations": sum(1 for item in checks if item["status"] == "VIOLATION"),
+        "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"}),
+    }
+    return {
+        "id": row["report_id"], "report_id": row["report_id"], "scanId": row["scan_id"], "scan_id": row["scan_id"],
+        "productName": row.get("product_name") or "Product name unavailable", "generatedAt": iso_datetime(row["generated_at"]),
+        "scanDate": iso_datetime(row["scanned_at"]), "officerName": row.get("officer_name") or "Unavailable",
+        "applicationName": "NIRIKSHA", "reportTitle": "NIRIKSHA Legal Metrology Compliance Report",
+        "overallStatus": {"COMPLIANT": "compliant", "VIOLATION": "non-compliant"}.get(row["status"], "needs-review"),
+        "summary": summary, "checks": [{
+            "id": str(item["id"]), "name": item["label"], "status": {"COMPLIANT": "compliant", "VIOLATION": "non-compliant"}.get(item["status"], "needs-review"),
+            "value": item["value"], "requirement": item["reference"], "explanation": item["explanation"], "evidence": item["evidence"], "confidence": item.get("confidence"),
+        } for item in checks], "pdfUrl": f"/api/reports/{row['report_id']}/pdf", "extractedData": extracted,
+    }
 
 
 def _json_from_response(text: str) -> Any:
@@ -284,7 +431,7 @@ def _build_extraction_prompt() -> str:
 
 
 async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not api_key:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is empty. Add your key to the project .env file before running the backend.")
 
@@ -295,7 +442,26 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
         contents.append(f"Image: {filename}\n")
     contents.append(_build_extraction_prompt())
 
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
+    try:
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
+    except Exception as error:
+        error_text = str(error)
+        if (
+            getattr(error, "status_code", None) == 401
+            or "UNAUTHENTICATED" in error_text
+            or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_text
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Gemini rejected GEMINI_API_KEY. Create a fresh Gemini API key in Google AI Studio, "
+                    "replace GEMINI_API_KEY in the backend .env file, and restart Uvicorn."
+                ),
+            ) from error
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini image analysis is temporarily unavailable. Check the backend log and try again.",
+        ) from error
     text = getattr(response, "text", None)
     if not text:
         text = ""
@@ -315,13 +481,66 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
     return payload
 
 
+@app.on_event("startup")
+async def startup() -> None:
+    try:
+        init_db()
+    except Exception as error:  # The API can still start and expose a useful health/error response.
+        print(f"NIRIKSHA database initialization failed: {error}")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    try:
+        with connect() as connection:
+            connection.execute("SELECT 1")
+        return {"status": "ok", "database": "ok"}
+    except Exception:
+        return {"status": "ok", "database": "unavailable"}
+
+
+@app.post("/api/db/init")
+async def initialize_database() -> dict[str, str]:
+    try:
+        init_db()
+        return {"status": "ok", "message": "PostgreSQL schema initialized and demo users ensured."}
+    except Exception:
+        raise HTTPException(status_code=503, detail="The PostgreSQL schema could not be initialized. Check DATABASE_URL and database availability.")
+
+
+@app.post("/api/auth/login")
+async def login(request: LoginRequest) -> dict[str, Any]:
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE login_id = %s", (request.login_id.strip(),))
+                user = cursor.fetchone()
+    except Exception:
+        raise HTTPException(status_code=503, detail="The authentication service is unavailable. Check the PostgreSQL connection.")
+    if not user or (request.role and user["role"] != request.role) or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+    return {
+        "token": create_token(user["id"]),
+        "user": {"id": user["id"], "loginId": user["login_id"], "name": user["name"], "role": user["role"], "email": user.get("email") or "", "location": user.get("location") or "", "officerId": user.get("officer_id")},
+    }
+
+
+@app.post("/api/auth/register")
+async def register(request: RegisterRequest) -> dict[str, Any]:
+    if request.role != "consumer" or len(request.password) < 8:
+        raise HTTPException(status_code=400, detail="Only consumer registration is available and the password must be at least 8 characters.")
+    try:
+        user = create_user(request.login_id.strip(), request.password, request.name.strip(), request.role, request.email)
+    except Exception as error:
+        if "unique" in str(error).lower() or "duplicate" in str(error).lower():
+            raise HTTPException(status_code=409, detail="That login ID is already registered.")
+        raise HTTPException(status_code=503, detail="The account could not be saved. Check the PostgreSQL connection.")
+    return {"token": create_token(user["id"]), "user": {"id": user["id"], "loginId": user["login_id"], "name": user["name"], "role": user["role"], "email": user.get("email") or "", "location": user.get("location") or "", "officerId": None}}
 
 
 @app.post("/api/scan")
-async def scan_images(images: list[UploadFile] = File(...)) -> dict[str, Any]:
+async def scan_images(images: list[UploadFile] = File(...), authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _user_or_401(authorization)
     if len(images) < 2:
         raise HTTPException(status_code=400, detail="At least 2 images are required for a scan.")
 
@@ -354,21 +573,185 @@ async def scan_images(images: list[UploadFile] = File(...)) -> dict[str, Any]:
                 "reference": outcome.legal_reference,
                 "explanation": outcome.explanation,
                 "sourceImage": None,
+                "confidence": None,
             }
         )
+    scan_id = new_id("scan")
+    image_filename = f"{uuid.uuid4().hex}{Path(loaded[0][0]).suffix.lower() or '.jpg'}"
+    image_path = STORAGE_DIR / image_filename
+    try:
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(loaded[0][2])
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO scans (scan_id, user_id, product_name, overall_status, image_ref, image_metadata, extracted_data)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    """,
+                    (scan_id, user["id"], package.generic_name.value or "Product name unavailable", result.overall_status.value,
+                     f"/api/uploads/{image_filename}", json.dumps({"filename": loaded[0][0], "mime_type": loaded[0][1], "image_count": len(loaded)}),
+                     json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {})})),
+                )
+                for outcome in result.outcomes:
+                    cursor.execute(
+                        """
+                        INSERT INTO compliance_results (scan_id, check_name, status, extracted_value, applicable_requirement, explanation, evidence)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (scan_id, outcome.rule_id, outcome.status.value, outcome.evidence or None, outcome.legal_reference, outcome.explanation, outcome.evidence or None),
+                    )
+            connection.commit()
+    except Exception:
+        try:
+            image_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(status_code=503, detail="The scan was analyzed but could not be saved. Check the PostgreSQL connection and storage permissions.")
 
-    response = {
+    scan = _get_scan(scan_id, user)
+    if not scan:
+        raise HTTPException(status_code=503, detail="The scan was saved but could not be loaded.")
+    return {
         "overall_status": result.overall_status.value,
         "checks": checks,
         "coverage": payload.get("image_coverage", {"overall": "UNKNOWN", "minimum_required_surfaces_covered": False, "notes": ""}),
-        "summary": {
-            "total_checks": len(checks),
-            "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"),
-            "violations": sum(1 for item in checks if item["status"] == "VIOLATION"),
-            "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"}),
-        },
+        "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})},
+        "scan": scan,
     }
-    return response
+
+
+@app.get("/api/uploads/{filename}")
+async def uploaded_image(filename: str):
+    from fastapi.responses import FileResponse
+    path = (STORAGE_DIR / Path(filename).name).resolve()
+    if path.parent != STORAGE_DIR or not path.is_file():
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(path)
+
+
+@app.get("/api/scans")
+async def list_scans(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    user = _user_or_401(authorization)
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                if user["role"] == "officer":
+                    cursor.execute("SELECT * FROM scans ORDER BY scanned_at DESC")
+                else:
+                    cursor.execute("SELECT * FROM scans WHERE user_id = %s ORDER BY scanned_at DESC", (user["id"],))
+                rows = cursor.fetchall()
+                return [_scan_dto(row, _result_rows(cursor, row["scan_id"])) for row in rows]
+    except Exception:
+        raise HTTPException(status_code=503, detail="Scan history is temporarily unavailable.")
+
+
+@app.get("/api/scans/{scan_id}")
+async def get_scan(scan_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _user_or_401(authorization)
+    try:
+        scan = _get_scan(scan_id, user)
+    except Exception:
+        raise HTTPException(status_code=503, detail="The scan could not be loaded.")
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found.")
+    return scan
+
+
+def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.*, s.product_name, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, u.name AS officer_name
+                FROM reports r JOIN scans s ON s.scan_id = r.scan_id JOIN users u ON u.id = r.generated_by
+                WHERE r.report_id = %s
+                """, (report_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            if user["role"] != "officer" and row["generated_by"] != user["id"]:
+                return None
+            row["status"] = row["scan_status"]
+            return _report_dto(row, _result_rows(cursor, row["scan_id"]), row.get("extracted_data") or {})
+
+
+@app.post("/api/reports/{scan_id}")
+async def generate_report(scan_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _officer_or_403(authorization)
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT s.*, u.name AS officer_name FROM scans s JOIN users u ON u.id = s.user_id WHERE s.scan_id = %s", (scan_id,))
+                scan = cursor.fetchone()
+                if not scan:
+                    raise HTTPException(status_code=404, detail="Scan not found.")
+                checks = _result_rows(cursor, scan_id)
+                report_id = new_id("report")
+                generated_at = datetime.now(UTC)
+                row = {"report_id": report_id, "scan_id": scan_id, "product_name": scan.get("product_name"), "overall_status": scan["overall_status"], "scanned_at": scan["scanned_at"], "generated_at": generated_at, "officer_name": user["name"]}
+                pdf_path = STORAGE_DIR / "reports" / f"{report_id}.pdf"
+                pdf_report = {**row, "status": scan["overall_status"], "extracted_data": scan.get("extracted_data") or {}, "checks": checks, "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})}}
+                create_pdf(pdf_report, pdf_path)
+                cursor.execute("INSERT INTO reports (report_id, scan_id, generated_by, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)", (report_id, scan_id, user["id"], generated_at, str(pdf_path), scan["overall_status"], json.dumps({"generator": "reportlab"})))
+            connection.commit()
+        created = _report_record(report_id, user)
+        if not created:
+            raise HTTPException(status_code=503, detail="The report was generated but could not be loaded.")
+        return created
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="The PDF report could not be generated or saved.")
+
+
+@app.get("/api/reports")
+async def list_reports(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    user = _officer_or_403(authorization)
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT r.report_id FROM reports r ORDER BY r.generated_at DESC")
+                ids = [row["report_id"] for row in cursor.fetchall()]
+        return [item for report_id in ids if (item := _report_record(report_id, user))]
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="Reports are temporarily unavailable.")
+
+
+@app.get("/api/reports/{report_id}")
+async def get_report(report_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _officer_or_403(authorization)
+    try:
+        report = _report_record(report_id, user)
+    except Exception:
+        raise HTTPException(status_code=503, detail="The report could not be loaded.")
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return report
+
+
+@app.get("/api/reports/{report_id}/pdf")
+async def download_report(report_id: str, authorization: str | None = Header(default=None)):
+    user = _officer_or_403(authorization)
+    from fastapi.responses import FileResponse
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pdf_path, product_name FROM reports r JOIN scans s ON s.scan_id = r.scan_id WHERE r.report_id = %s", (report_id,))
+                row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Report not found.")
+        path = Path(row["pdf_path"]).resolve()
+        if not path.is_file() or STORAGE_DIR not in path.parents:
+            raise HTTPException(status_code=404, detail="The PDF file is no longer available.")
+        return FileResponse(path, media_type="application/pdf", filename=f"{report_id}.pdf")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="The PDF could not be downloaded.")
 
 
 if __name__ == "__main__":
