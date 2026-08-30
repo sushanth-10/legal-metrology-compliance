@@ -27,7 +27,8 @@ _ADDRESS = re.compile(r"\b\d{6}\b|(?:,|;).+", re.S)
 
 
 def _outcome(rule_id: str, title: str, status: Status, reference: str, explanation: str, observation: FieldObservation | None = None) -> RuleOutcome:
-    return RuleOutcome(rule_id, title, status, reference, explanation, observation.evidence if observation else "")
+    evidence = (observation.evidence or observation.value or "") if observation else ""
+    return RuleOutcome(rule_id, title, status, reference, explanation, evidence)
 
 
 def _can_conclude_noncompliance(package: ExtractedPackage) -> bool:
@@ -150,8 +151,17 @@ def unit_sale_price_check(package: ExtractedPackage) -> Iterable[RuleOutcome]:
 def consumer_care_check(package: ExtractedPackage) -> Iterable[RuleOutcome]:
     if package.context.assessment_target is AssessmentTarget.ECOMMERCE_LISTING:
         return
-    validator = lambda text: bool(_PHONE.search(text) and _EMAIL.search(text) and _ADDRESS.search(text))
-    yield _field_check("R6_2", "Consumer complaint contact", "LMPC Rules, 2011, Rule 6(2), substituted by 2015 amendment", package, package.consumer_care, validator)
+    contact = package.consumer_care
+    addressed_entity_is_visible = any(
+        field.state is ObservationState.PRESENT and field.value and _complete_addressed_entity(field.value)
+        for field in (package.manufacturer, package.packer, package.importer)
+    )
+    # A label may direct the consumer to the registered-office address printed
+    # in the manufacturer block. Evaluate that visible package evidence as a
+    # whole; do not require the extractor to duplicate the address in both
+    # fields. A phone or email is a usable complaint contact channel.
+    validator = lambda text: bool((_PHONE.search(text) or _EMAIL.search(text)) and (_ADDRESS.search(text) or addressed_entity_is_visible))
+    yield _field_check("R6_2", "Consumer complaint contact", "LMPC Rules, 2011, Rule 6(2), substituted by 2015 amendment", package, contact, validator)
 
 
 # Rule 6(7): a package containing genetically modified food must bear "GM".

@@ -70,10 +70,14 @@ def _field_from_record(field_name: str, record: Any) -> FieldObservation:
     bbox = record.get("bounding_box") or record.get("bbox") or {}
     if bbox and evidence:
         evidence = f"{evidence} :: {bbox}"
+    try:
+        normalized_confidence = float(confidence) if confidence is not None else None
+    except (TypeError, ValueError):
+        normalized_confidence = None
     return FieldObservation(
         state=state,
         value=value if state is not ObservationState.NOT_VISIBLE else None,
-        confidence=float(confidence) if confidence is not None else None,
+        confidence=normalized_confidence,
         evidence=evidence,
     )
 
@@ -105,6 +109,27 @@ def _as_bool(value: Any) -> bool | None:
     return bool(value)
 
 
+def _best_observation(observations: list[FieldObservation]) -> FieldObservation:
+    """Keep the strongest source when the extractor returns legacy aliases.
+
+    A model may return both a canonical field and an older alias.  Do not let a
+    later, weaker alias replace a visible declaration with an unverified one.
+    """
+    if not observations:
+        return FieldObservation(state=ObservationState.NOT_ASSESSED)
+    rank = {
+        ObservationState.PRESENT: 4,
+        ObservationState.UNREADABLE: 3,
+        ObservationState.NOT_VISIBLE: 2,
+        ObservationState.CONFIRMED_ABSENT: 1,
+        ObservationState.NOT_ASSESSED: 0,
+    }
+    return max(
+        observations,
+        key=lambda item: (rank[item.state], item.confidence or 0.0, bool(item.evidence), len(item.value or "")),
+    )
+
+
 def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
     fields = payload.get("fields", {})
     context = payload.get("context", {})
@@ -120,7 +145,9 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
         is_genetically_modified_food=_as_bool(context.get("is_genetically_modified_food")),
         requires_vegetarian_origin_mark=_as_bool(context.get("requires_vegetarian_origin_mark")),
         is_ecommerce_entity_offering_imported_product=_as_bool(context.get("is_ecommerce_entity_offering_imported_product")),
-        inspected_relevant_label_surfaces=bool(context.get("inspected_relevant_label_surfaces", True)),
+        # Missing coverage data must never be treated as proof that every
+        # relevant label surface was inspected.
+        inspected_relevant_label_surfaces=_as_bool(context.get("inspected_relevant_label_surfaces")) is True,
     )
 
     mapping = {
@@ -145,12 +172,18 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
         "use_by": "best_before_or_use_by",
         "consumer_care": "consumer_care",
         "consumer_care_details": "consumer_care",
+        "component_names_and_quantities": "component_names_and_quantities",
+        "gm_mark": "gm_mark",
+        "dietary_origin_mark": "dietary_origin_mark",
+        "vegetarian_non_vegetarian_mark": "dietary_origin_mark",
+        "ecommerce_country_of_origin_filter": "ecommerce_country_of_origin_filter",
     }
 
-    extra_fields: dict[str, FieldObservation] = {}
+    candidates: dict[str, list[FieldObservation]] = {}
     for dto_key, package_key in mapping.items():
         if dto_key in fields:
-            extra_fields[package_key] = _field_from_record(dto_key, fields[dto_key])
+            candidates.setdefault(package_key, []).append(_field_from_record(dto_key, fields[dto_key]))
+    extra_fields = {key: _best_observation(value) for key, value in candidates.items()}
 
     package = ExtractedPackage(
         generic_name=extra_fields.get("generic_name", FieldObservation(state=ObservationState.NOT_ASSESSED)),
@@ -164,6 +197,10 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
         manufacture_or_pack_or_import_date=extra_fields.get("manufacture_or_pack_or_import_date", FieldObservation(state=ObservationState.NOT_ASSESSED)),
         best_before_or_use_by=extra_fields.get("best_before_or_use_by", FieldObservation(state=ObservationState.NOT_ASSESSED)),
         consumer_care=extra_fields.get("consumer_care", FieldObservation(state=ObservationState.NOT_ASSESSED)),
+        component_names_and_quantities=extra_fields.get("component_names_and_quantities", FieldObservation(state=ObservationState.NOT_ASSESSED)),
+        gm_mark=extra_fields.get("gm_mark", FieldObservation(state=ObservationState.NOT_ASSESSED)),
+        dietary_origin_mark=extra_fields.get("dietary_origin_mark", FieldObservation(state=ObservationState.NOT_ASSESSED)),
+        ecommerce_country_of_origin_filter=extra_fields.get("ecommerce_country_of_origin_filter", FieldObservation(state=ObservationState.NOT_ASSESSED)),
         context=package_context,
     )
     return package
@@ -171,13 +208,34 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
 
 def _build_extraction_prompt() -> str:
     return """
-    Extract only what is visible in the supplied package label images.
+    Extract only what is visible in the supplied package label images. Examine
+    every supplied image before deciding a field is not visible. Treat each as
+    a different possible package surface; do not use text from one field to
+    manufacture a value for another.
 
     Rules:
     - Do not invent missing text.
-    - Do not mark a field as missing/violation simply because it is not visible in the image. Instead set status to NOT_VISIBLE.
+    - Return exact, verbatim label text for value and evidence. Preserve the
+      printed currency, punctuation, units, and dates; do not normalize values.
+    - VISIBLE means the declaration or symbol itself is visible. NOT_VISIBLE
+      means it was not found in supplied images. Use CONFIRMED_ABSENT only when
+      all relevant label surfaces are clearly readable and the declaration is
+      genuinely absent; otherwise use NOT_VISIBLE or UNREADABLE.
     - If the text is visible but difficult to read, set status to UNREADABLE and provide the best readable text if available.
-    - If a declaration is clearly absent on inspected surfaces, set status to CONFIRMED_ABSENT.
+    - Never infer net quantity from serving size, "per serve", portion size,
+      nutrition facts, price, or unit sale price. Extract net_quantity only
+      from a standalone net quantity declaration.
+    - Keep MRP/retail price separate from unit_sale_price. For example, extract
+      "MRP ₹20.00 (INCL. OF ALL TAXES)" as MRP and "USP ₹1.00 PER g" as unit
+      sale price when those exact declarations are visible.
+    - generic_name is the common/generic commodity wording (for example,
+      "POTATO CHIPS"), not merely a brand or flavour. product_name may identify
+      the branded product separately.
+    - dietary_origin_mark must record a visibly detected green vegetarian or
+      brown non-vegetarian symbol, including its type in value/evidence.
+    - manufacturer_details and consumer_care_details must include the complete
+      visible declaration, including address, email, phone, and references to
+      an address stated above where printed.
     - Return valid JSON only. No markdown fences.
     - Include image_coverage and context sections for downstream legal validation.
     - Confidence should be between 0 and 1.
@@ -216,6 +274,9 @@ def _build_extraction_prompt() -> str:
         "best_before": {"status": "NOT_VISIBLE", "value": null, "confidence": 0.0, "evidence": "Not visible on the provided images."},
         "use_by": {"status": "NOT_VISIBLE", "value": null, "confidence": 0.0, "evidence": "Not visible on the provided images."},
         "consumer_care_details": {"status": "VISIBLE", "value": "Consumer care: ...", "confidence": 0.9, "evidence": "..."},
+        "dietary_origin_mark": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": "Green vegetarian symbol", "confidence": 0.9, "evidence": "..."},
+        "gm_mark": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": null, "confidence": 0.0, "evidence": "..."},
+        "component_names_and_quantities": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": null, "confidence": 0.0, "evidence": "..."},
         "other_declarations": {"status": "NOT_VISIBLE", "value": null, "confidence": 0.0, "evidence": "No additional declarations visible."}
       }
     }
@@ -286,7 +347,10 @@ async def scan_images(images: list[UploadFile] = File(...)) -> dict[str, Any]:
                 "id": outcome.rule_id,
                 "label": outcome.title,
                 "status": outcome.status.value,
-                "value": outcome.evidence or "No declaration observed",
+                # A visible value without a separate evidence excerpt is still
+                # not a missing declaration. _outcome preserves the value as a
+                # fallback so the existing report card remains factually true.
+                "value": outcome.evidence or "Evidence unavailable for this assessment",
                 "reference": outcome.legal_reference,
                 "explanation": outcome.explanation,
                 "sourceImage": None,
