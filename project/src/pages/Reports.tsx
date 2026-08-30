@@ -1,128 +1,140 @@
-import {
-  FileText,
-  Download,
-  Calendar,
-  Filter,
-  Plus,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-} from 'lucide-react';
+import { useState } from 'react';
+import { Download, Eye, FileText, X } from 'lucide-react';
 import { useApp } from '@/store';
 import { PageHeader, StatusBadge } from '@/components/ui';
-
-const reportTemplates = [
-  { id: 'r1', name: 'Monthly Compliance Summary', desc: 'Aggregated compliance stats for the month', icon: FileText },
-  { id: 'r2', name: 'Violation Breakdown', desc: 'Detailed list of all detected violations', icon: AlertCircle },
-  { id: 'r3', name: 'Zone Inspection Report', desc: 'Per-zone inspection and complaint summary', icon: Calendar },
-  { id: 'r4', name: 'Product Category Report', desc: 'Compliance by product category', icon: Filter },
-];
+import { downloadReportAsPdf } from '@/lib/reporting';
+import type { GeneratedReport } from '@/types';
 
 export function Reports() {
-  const { scans, setPage } = useApp();
+  const { reports, setPage } = useApp();
+  const [previewReport, setPreviewReport] = useState<GeneratedReport | null>(null);
 
   return (
     <div>
       <PageHeader
         title="Reports"
-        subtitle="Generate, download and manage compliance reports."
+        subtitle="Generated formal compliance reports from completed scan results."
         actions={
-          <button className="btn-primary">
-            <Plus className="w-4 h-4" /> New Report
+          <button onClick={() => setPage('history')} className="btn-secondary">
+            <FileText className="w-4 h-4" /> View scan history
           </button>
         }
       />
 
-      {/* Templates */}
-      <h3 className="font-semibold text-ink-900 mb-3">Report Templates</h3>
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-7">
-        {reportTemplates.map((r) => (
-          <div key={r.id} className="card card-hover p-5 flex flex-col gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center">
-              <r.icon className="w-5 h-5" />
-            </div>
-            <div className="flex-1">
-              <p className="font-semibold text-ink-900 text-sm">{r.name}</p>
-              <p className="text-xs text-ink-500 mt-1">{r.desc}</p>
-            </div>
-            <button className="btn-secondary w-full justify-center text-xs">
-              <Download className="w-3.5 h-3.5" /> Generate
-            </button>
-          </div>
-        ))}
-      </div>
-
-      {/* Recent reports from scans */}
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold text-ink-900">Generated Reports</h3>
-        <button onClick={() => setPage('history')} className="btn-ghost text-brand-600 text-sm">
-          View all scans
-        </button>
-      </div>
-
-      <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-ink-50">
-              <tr>
-                <th className="table-th">Report</th>
-                <th className="table-th">Product</th>
-                <th className="table-th">Date</th>
-                <th className="table-th">Status</th>
-                <th className="table-th text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-ink-100">
-              {scans.map((s) => (
-                <tr key={s.id} className="hover:bg-ink-50/60">
-                  <td className="table-td">
-                    <div className="flex items-center gap-2">
-                      <FileText className="w-4 h-4 text-ink-400" />
-                      <span className="font-medium text-ink-800">
-                        RPT-{s.id.replace('sc-', '').slice(-4)}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="table-td">{s.product}</td>
-                  <td className="table-td text-ink-500">{s.date}</td>
-                  <td className="table-td">
-                    <StatusBadge status={s.status} />
-                  </td>
-                  <td className="table-td text-right">
-                    <button className="btn-secondary px-3 py-1.5 text-xs">
-                      <Download className="w-3.5 h-3.5" /> Download
-                    </button>
-                  </td>
+      {reports.length === 0 ? (
+        <div className="card p-8 text-center">
+          <FileText className="w-10 h-10 text-ink-300 mx-auto" />
+          <h3 className="font-semibold text-ink-900 mt-4">No generated reports yet</h3>
+          <p className="text-sm text-ink-500 mt-2 max-w-md mx-auto">
+            Generate a PDF report from an officer-approved scan result to see it here.
+          </p>
+        </div>
+      ) : (
+        <div className="card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-ink-50">
+                <tr>
+                  <th className="table-th">Report</th>
+                  <th className="table-th">Product</th>
+                  <th className="table-th">Date</th>
+                  <th className="table-th">Status</th>
+                  <th className="table-th text-right">Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-ink-100">
+                {reports.map((report) => (
+                  <tr key={report.id} className="hover:bg-ink-50/60">
+                    <td className="table-td">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-ink-400" />
+                        <span className="font-medium text-ink-800">{report.id}</span>
+                      </div>
+                    </td>
+                    <td className="table-td">{report.productName}</td>
+                    <td className="table-td text-ink-500">{new Date(report.generatedAt).toLocaleString()}</td>
+                    <td className="table-td"><StatusBadge status={report.overallStatus} /></td>
+                    <td className="table-td text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={() => setPreviewReport(report)} className="btn-secondary px-3 py-1.5 text-xs">
+                          <Eye className="w-3.5 h-3.5" /> View Report
+                        </button>
+                        <button onClick={() => downloadReportAsPdf(report)} className="btn-secondary px-3 py-1.5 text-xs">
+                          <Download className="w-3.5 h-3.5" /> Download PDF
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="grid grid-cols-3 gap-4 mt-6">
-        <div className="card p-4 flex items-center gap-3">
-          <CheckCircle2 className="w-8 h-8 text-success-500" />
-          <div>
-            <p className="text-xl font-bold text-ink-900">96</p>
-            <p className="text-xs text-ink-500">Compliant reports</p>
+      {previewReport && (
+        <div className="fixed inset-0 z-50 bg-ink-950/70 flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-2xl border border-ink-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-ink-500">Report preview</p>
+                <h3 className="font-semibold text-ink-900 text-xl mt-1">{previewReport.reportTitle}</h3>
+              </div>
+              <button onClick={() => setPreviewReport(null)} className="btn-secondary px-3 py-2">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 rounded-xl bg-ink-50 border border-ink-200 p-4 text-sm text-ink-700">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div><span className="font-semibold text-ink-800">Application:</span> {previewReport.applicationName}</div>
+                <div><span className="font-semibold text-ink-800">Generated:</span> {new Date(previewReport.generatedAt).toLocaleString()}</div>
+                <div><span className="font-semibold text-ink-800">Product:</span> {previewReport.productName}</div>
+                <div><span className="font-semibold text-ink-800">Status:</span> {previewReport.overallStatus}</div>
+              </div>
+              <div className="mt-4 grid sm:grid-cols-3 gap-3 text-xs">
+                <div className="rounded-lg bg-danger-50 p-2 text-danger-700"><strong>Violations:</strong> {previewReport.summary.violations}</div>
+                <div className="rounded-lg bg-warning-50 p-2 text-warning-700"><strong>Review:</strong> {previewReport.summary.review}</div>
+                <div className="rounded-lg bg-success-50 p-2 text-success-700"><strong>Compliant:</strong> {previewReport.summary.compliant}</div>
+              </div>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              {previewReport.checks.map((check) => (
+                <div key={check.id} className="rounded-xl border border-ink-200 p-4">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <p className="font-semibold text-ink-900">{check.name}</p>
+                    <span className={`badge text-[10px] ${
+                      check.status === 'compliant'
+                        ? 'bg-success-50 text-success-700'
+                        : check.status === 'non-compliant'
+                        ? 'bg-danger-50 text-danger-700'
+                        : 'bg-warning-50 text-warning-700'
+                    }`}>
+                      {check.status.replace('-', ' ')}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-sm text-ink-700 space-y-2">
+                    <p><span className="font-semibold text-ink-800">Extracted declaration/value:</span> {check.value}</p>
+                    <p><span className="font-semibold text-ink-800">Applicable requirement/rule:</span> {check.requirement}</p>
+                    <p><span className="font-semibold text-ink-800">Explanation:</span> {check.explanation}</p>
+                    <p><span className="font-semibold text-ink-800">Evidence/source:</span> {check.evidence}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5 flex flex-col sm:flex-row gap-3 justify-end">
+              <button onClick={() => downloadReportAsPdf(previewReport)} className="btn-primary py-2.5">
+                <Download className="w-4 h-4" /> Download PDF
+              </button>
+              <button onClick={() => setPreviewReport(null)} className="btn-secondary py-2.5">
+                Close Preview
+              </button>
+            </div>
           </div>
         </div>
-        <div className="card p-4 flex items-center gap-3">
-          <XCircle className="w-8 h-8 text-danger-500" />
-          <div>
-            <p className="text-xl font-bold text-ink-900">24</p>
-            <p className="text-xs text-ink-500">Violation reports</p>
-          </div>
-        </div>
-        <div className="card p-4 flex items-center gap-3">
-          <AlertCircle className="w-8 h-8 text-warning-500" />
-          <div>
-            <p className="text-xl font-bold text-ink-900">8</p>
-            <p className="text-xs text-ink-500">Pending review</p>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

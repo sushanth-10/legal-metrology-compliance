@@ -1,4 +1,4 @@
-import { useRef, useState, type ChangeEvent, type DragEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import { AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronUp, Circle, CircleAlert, Eye, FileImage, FileText, ImageIcon, Info, Loader2, Plus, RotateCcw, ScanLine, SearchCheck, ShieldCheck, Sparkles, Upload, X } from 'lucide-react';
 import { InfoNote, PageHeader } from '@/components/ui';
 
@@ -8,6 +8,13 @@ type Status = 'COMPLIANT' | 'VIOLATION' | 'UNABLE_TO_VERIFY' | 'NOT_APPLICABLE' 
 type Visibility = 'VISIBLE' | 'NOT_VISIBLE' | 'UNREADABLE' | 'NOT_ASSESSED';
 type ProcessingStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'unable_to_verify';
 type ImageItem = { id: string; name: string; url: string };
+type CameraState = {
+  open: boolean;
+  slotIndex: number | null;
+  stream: MediaStream | null;
+  capturedDataUrl: string | null;
+  error: string | null;
+};
 type ScanApiResponse = {
   overall_status: Status;
   checks: Check[];
@@ -100,13 +107,125 @@ export function ScanProduct() {
   const [result, setResult] = useState<ScanApiResponse | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null); const cameraRef = useRef<HTMLInputElement>(null); const count = slots.filter(Boolean).length;
-  const choose = (index: number, camera = false) => { setTarget(index); (camera ? cameraRef : fileRef).current?.click(); };
-  const storeFile = (file: File | undefined, index = target) => { if (!file || !file.type.startsWith('image/')) return; const reader = new FileReader(); reader.onload = () => setSlots((old) => old.map((item, i) => i === index ? { id: String(Date.now()) + '-' + i, name: file.name, url: reader.result as string } : item)); reader.readAsDataURL(file); };
+  const [cameraState, setCameraState] = useState<CameraState>({
+    open: false,
+    slotIndex: null,
+    stream: null,
+    capturedDataUrl: null,
+    error: null,
+  });
+  const fileRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const count = slots.filter(Boolean).length;
+
+  const stopCameraStream = () => {
+    if (cameraState.stream) {
+      cameraState.stream.getTracks().forEach((track) => track.stop());
+    }
+  };
+
+  const closeCamera = () => {
+    stopCameraStream();
+    setCameraState({ open: false, slotIndex: null, stream: null, capturedDataUrl: null, error: null });
+  };
+
+  const choose = (index: number, useCamera = false) => {
+    setTarget(index);
+    if (useCamera) {
+      void openCamera(index);
+      return;
+    }
+    fileRef.current?.click();
+  };
+
+  const openCamera = async (index: number) => {
+    stopCameraStream();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraState({ open: false, slotIndex: null, stream: null, capturedDataUrl: null, error: 'This browser does not support camera access. Please use the Upload option instead.' });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+        },
+        audio: false,
+      });
+      setCameraState({ open: true, slotIndex: index, stream, capturedDataUrl: null, error: null });
+    } catch (error) {
+      const message = error instanceof DOMException && error.name === 'NotAllowedError'
+        ? 'Camera permission was denied. Upload remains available and the scan workflow is unaffected.'
+        : error instanceof DOMException && error.name === 'NotFoundError'
+        ? 'No camera is available on this device.'
+        : 'Camera initialization failed. Please try again or use the Upload option instead.';
+      setCameraState({ open: false, slotIndex: null, stream: null, capturedDataUrl: null, error: message });
+    }
+  };
+
+  useEffect(() => {
+    if (!cameraState.open || !videoRef.current || !cameraState.stream) return;
+    videoRef.current.srcObject = cameraState.stream;
+    videoRef.current.play().catch(() => undefined);
+  }, [cameraState.open, cameraState.stream]);
+
+  useEffect(() => {
+    return () => {
+      if (cameraState.stream) {
+        cameraState.stream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [cameraState.stream]);
+
+  const storeFile = (file: File | undefined, index = target) => {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => setSlots((old) => old.map((item, i) => i === index ? { id: String(Date.now()) + '-' + i, name: file.name, url: reader.result as string } : item));
+    reader.readAsDataURL(file);
+  };
   const input = (event: ChangeEvent<HTMLInputElement>) => { storeFile(event.target.files?.[0]); event.target.value = ''; };
   const drop = (index: number, event: DragEvent<HTMLDivElement>) => { event.preventDefault(); storeFile(event.dataTransfer.files?.[0], index); };
   const remove = (index: number) => setSlots((old) => index < 2 ? old.map((item, i) => i === index ? null : item) : old.filter((_, i) => i !== index));
   const reset = () => { setSlots([null, null]); setStage('upload'); setMode('report'); setResult(null); setUploadError(null); };
+
+  const dataUrlToFile = (dataUrl: string, filename: string) => {
+    const [header, content] = dataUrl.split(',');
+    const mime = header.match(/data:(image\/[a-zA-Z0-9.+-]+);base64/)?.[1] ?? 'image/jpeg';
+    const binary = atob(content || '');
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new File([bytes], filename, { type: mime });
+  };
+
+  const captureCameraPhoto = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const canvas = document.createElement('canvas');
+    const width = video.videoWidth || 1200;
+    const height = video.videoHeight || 900;
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.drawImage(video, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    stopCameraStream();
+    setCameraState((prev) => ({ ...prev, stream: null, capturedDataUrl: dataUrl }));
+  };
+
+  const retakeCameraPhoto = () => {
+    if (cameraState.slotIndex === null) return;
+    stopCameraStream();
+    setCameraState({ open: false, slotIndex: cameraState.slotIndex, stream: null, capturedDataUrl: null, error: null });
+    void openCamera(cameraState.slotIndex);
+  };
+
+  const confirmCameraPhoto = () => {
+    if (!cameraState.capturedDataUrl || cameraState.slotIndex === null) return;
+    const file = dataUrlToFile(cameraState.capturedDataUrl, `camera-${cameraState.slotIndex + 1}.jpg`);
+    closeCamera();
+    storeFile(file, cameraState.slotIndex);
+  };
 
   const runScan = async (scanMode: Mode) => {
     const selected = slots.filter(Boolean) as ImageItem[];
@@ -167,5 +286,5 @@ export function ScanProduct() {
   if (stage === 'processing') return <Processing mode={mode} results={() => setStage(mode === 'advanced' ? 'advanced' : 'report')} back={() => setStage('upload')} />;
   if (stage === 'report') return <Report images={slots} back={reset} result={result} />;
   if (stage === 'advanced') return <Advanced images={slots} back={reset} />;
-  return <div className="max-w-6xl mx-auto"><PageHeader title="Product Compliance Scan" subtitle="Capture at least two package surfaces for a more complete Legal Metrology review." /><div className="grid lg:grid-cols-[1fr_300px] gap-6 items-start"><section className="card p-5 sm:p-6"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5"><div><h2 className="font-semibold text-ink-900">Upload package images</h2><p className="text-sm text-ink-500 mt-1">Front, back, price panel, and complaint-contact panels are useful.</p></div><span className={'badge ' + (count >= 2 ? 'bg-success-50 text-success-700' : 'bg-warning-50 text-warning-700')}><ImageIcon className="w-3.5 h-3.5" />{count}/2 minimum</span></div><div className="grid sm:grid-cols-2 gap-4">{slots.map((item, index) => <ImageSlot key={item?.id ?? 'empty-' + index} image={item} index={index} choose={() => choose(index)} camera={() => choose(index, true)} drop={(e) => drop(index, e)} remove={() => remove(index)} />)}</div><button onClick={() => setSlots((old) => [...old, null])} className="btn-secondary w-full mt-4 py-3"><Plus className="w-4 h-4" />Add another image</button><div className="mt-4"><InfoNote><strong>Minimum 2 images required.</strong> A declaration not visible in these images is unable to verify—not automatically a violation.</InfoNote></div>{uploadError && <div className="mt-4 rounded-xl border border-danger-200 bg-danger-50 p-3 text-sm text-danger-700">{uploadError}</div>}<input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={input} /><input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={input} /></section><aside className="card p-5 lg:sticky lg:top-6"><div className="w-11 h-11 rounded-xl bg-brand-50 text-brand-600 grid place-items-center"><ShieldCheck className="w-5 h-5" /></div><h2 className="font-semibold text-ink-900 mt-4">Choose scan type</h2><p className="text-sm text-ink-500 mt-1">Buttons activate after two images are attached.</p><div className="mt-5 space-y-3"><button disabled={count < 2 || isSubmitting} onClick={() => void runScan('report')} className="btn-primary w-full py-3"><FileText className="w-4 h-4" />{isSubmitting ? 'Scanning...' : 'Generate Report'}</button><button disabled={count < 2 || isSubmitting} onClick={() => void runScan('advanced')} className="btn-secondary w-full py-3"><Sparkles className="w-4 h-4 text-brand-600" />Advanced Scan</button></div><div className="mt-5 pt-5 border-t border-ink-100 text-sm text-ink-600 space-y-3"><p><strong className="text-ink-800">Generate Report</strong><br />General declaration review.</p><p><strong className="text-ink-800">Advanced Scan</strong><br />MRP review and annotation-ready evidence.</p></div>{count < 2 && <div className="mt-4 flex gap-2 text-xs text-warning-800 bg-warning-50 border border-warning-200 rounded-xl p-3"><Info className="w-4 h-4 shrink-0" />Add {2 - count} more image{2 - count === 1 ? '' : 's'} to continue.</div>}</aside></div></div>;
+  return <div className="max-w-6xl mx-auto"><PageHeader title="Product Compliance Scan" subtitle="Capture at least two package surfaces for a more complete Legal Metrology review." /><div className="grid lg:grid-cols-[1fr_300px] gap-6 items-start"><section className="card p-5 sm:p-6"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5"><div><h2 className="font-semibold text-ink-900">Upload package images</h2><p className="text-sm text-ink-500 mt-1">Front, back, price panel, and complaint-contact panels are useful.</p></div><span className={'badge ' + (count >= 2 ? 'bg-success-50 text-success-700' : 'bg-warning-50 text-warning-700')}><ImageIcon className="w-3.5 h-3.5" />{count}/2 minimum</span></div><div className="grid sm:grid-cols-2 gap-4">{slots.map((item, index) => <ImageSlot key={item?.id ?? 'empty-' + index} image={item} index={index} choose={() => choose(index)} camera={() => choose(index, true)} drop={(e) => drop(index, e)} remove={() => remove(index)} />)}</div><button onClick={() => setSlots((old) => [...old, null])} className="btn-secondary w-full mt-4 py-3"><Plus className="w-4 h-4" />Add another image</button><div className="mt-4 rounded-xl border border-ink-200 bg-ink-50 p-4"><div className="flex items-center gap-2"><Info className="w-4 h-4 text-brand-600" /><h3 className="font-semibold text-ink-900">Photo Tips</h3></div><ul className="mt-3 space-y-1.5 text-sm text-ink-600 list-disc pl-5"><li>Upload clear, high-resolution photos.</li><li>Capture the front and back of the package whenever possible.</li><li>Ensure text and declarations are readable and not blurry.</li><li>Avoid glare, reflections, shadows, folded packaging, and obstructed labels.</li><li>Include the complete package surface in the photo.</li><li>For multiple images, upload different sides or angles of the same package.</li></ul><p className="mt-3 text-xs text-ink-500">Better-quality images improve extraction and compliance assessment accuracy.</p></div><div className="mt-4"><InfoNote><strong>Minimum 2 images required.</strong> A declaration not visible in these images is unable to verify—not automatically a violation.</InfoNote></div>{uploadError && <div className="mt-4 rounded-xl border border-danger-200 bg-danger-50 p-3 text-sm text-danger-700">{uploadError}</div>}{cameraState.error && <div className="mt-4 rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800">{cameraState.error}</div>}<input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={input} /></section><aside className="card p-5 lg:sticky lg:top-6"><div className="w-11 h-11 rounded-xl bg-brand-50 text-brand-600 grid place-items-center"><ShieldCheck className="w-5 h-5" /></div><h2 className="font-semibold text-ink-900 mt-4">Choose scan type</h2><p className="text-sm text-ink-500 mt-1">Buttons activate after two images are attached.</p><div className="mt-5 space-y-3"><button disabled={count < 2 || isSubmitting} onClick={() => void runScan('report')} className="btn-primary w-full py-3"><FileText className="w-4 h-4" />{isSubmitting ? 'Scanning...' : 'Generate Report'}</button><button disabled={count < 2 || isSubmitting} onClick={() => void runScan('advanced')} className="btn-secondary w-full py-3"><Sparkles className="w-4 h-4 text-brand-600" />Advanced Scan</button></div><div className="mt-5 pt-5 border-t border-ink-100 text-sm text-ink-600 space-y-3"><p><strong className="text-ink-800">Generate Report</strong><br />General declaration review.</p><p><strong className="text-ink-800">Advanced Scan</strong><br />MRP review and annotation-ready evidence.</p></div>{count < 2 && <div className="mt-4 flex gap-2 text-xs text-warning-800 bg-warning-50 border border-warning-200 rounded-xl p-3"><Info className="w-4 h-4 shrink-0" />Add {2 - count} more image{2 - count === 1 ? '' : 's'} to continue.</div>}</aside></div>{cameraState.open && <div className="fixed inset-0 z-50 bg-ink-950/75 flex items-center justify-center p-4"><div className="w-full max-w-md rounded-2xl border border-ink-200 bg-white shadow-2xl overflow-hidden"><div className="flex items-center justify-between border-b border-ink-100 px-4 py-3"><div><p className="text-xs uppercase tracking-wide text-ink-500">Camera capture</p><h3 className="font-semibold text-ink-900">Take a product photo</h3></div><button onClick={closeCamera} className="btn-secondary px-2.5 py-1.5"><X className="w-4 h-4" /></button></div>{cameraState.capturedDataUrl ? <div className="p-4"><div className="relative overflow-hidden rounded-xl bg-ink-100 border border-ink-200"><img src={cameraState.capturedDataUrl} alt="Captured product label preview" className="w-full h-72 object-cover" /></div></div> : <div className="p-4"><div className="relative overflow-hidden rounded-xl bg-ink-100 border border-ink-200"><video ref={videoRef} autoPlay muted playsInline className="w-full h-72 object-cover" /></div></div>}<div className="flex gap-2 p-4 pt-0"><div className="flex-1 flex gap-2">{cameraState.capturedDataUrl ? <><button onClick={retakeCameraPhoto} className="btn-secondary flex-1 py-2.5"><RotateCcw className="w-4 h-4" />Retake</button><button onClick={confirmCameraPhoto} className="btn-primary flex-1 py-2.5"><CheckCircle2 className="w-4 h-4" />Use Photo</button></> : <button onClick={captureCameraPhoto} className="btn-primary flex-1 py-2.5"><Camera className="w-4 h-4" />Take Photo</button>}</div><button onClick={closeCamera} className="btn-secondary px-3 py-2.5">Close</button></div></div></div>} </div>;
 }

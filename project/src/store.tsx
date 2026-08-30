@@ -1,9 +1,10 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
-import type { PageKey, Role, Scan, Complaint, User, View, AuthRoute } from '@/types';
+import type { PageKey, Role, Scan, Complaint, User, View, AuthRoute, GeneratedReport } from '@/types';
 import { defaultUser, officerUser, sampleScans, sampleComplaints } from '@/data';
 import { mockCredentials } from '@/lib/validation';
 
 const STORAGE_KEY = 'niriksha_session';
+const REPORTS_STORAGE_KEY = 'niriksha_reports';
 
 interface StoredSession {
   isAuthenticated: boolean;
@@ -30,6 +31,25 @@ function saveSession(s: StoredSession | null) {
   }
 }
 
+function loadReports(): GeneratedReport[] {
+  try {
+    const raw = localStorage.getItem(REPORTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as GeneratedReport[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveReports(reports: GeneratedReport[]) {
+  try {
+    localStorage.setItem(REPORTS_STORAGE_KEY, JSON.stringify(reports));
+  } catch {
+    /* ignore */
+  }
+}
+
 export interface Toast {
   id: number;
   type: 'success' | 'error' | 'info';
@@ -48,6 +68,8 @@ interface AppState {
   logout: () => void;
   scans: Scan[];
   addScan: (s: Scan) => void;
+  reports: GeneratedReport[];
+  addReport: (report: GeneratedReport) => void;
   complaints: Complaint[];
   addComplaint: (c: Complaint) => void;
   updateComplaintStatus: (id: string, status: Complaint['status']) => void;
@@ -67,6 +89,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>('consumer');
   const [view, setViewRaw] = useState<View>('login');
   const [scans, setScans] = useState<Scan[]>(sampleScans);
+  const [reports, setReports] = useState<GeneratedReport[]>(() => loadReports());
   const [complaints, setComplaints] = useState<Complaint[]>(sampleComplaints);
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -80,6 +103,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setViewRaw('dashboard');
     }
   }, []);
+
+  useEffect(() => {
+    saveReports(reports);
+  }, [reports]);
 
   const user: User = role === 'officer' ? officerUser : { ...defaultUser, name: loadSession()?.name ?? defaultUser.name };
 
@@ -128,6 +155,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [navigate, showToast]);
 
   const addScan = useCallback((s: Scan) => setScans((prev) => [s, ...prev]), []);
+  const addReport = useCallback((report: GeneratedReport) => {
+    setReports((prev) => {
+      const next = [report, ...prev.filter((item) => item.scanId !== report.scanId)];
+      return next;
+    });
+  }, []);
   const addComplaint = useCallback((c: Complaint) => setComplaints((prev) => [c, ...prev]), []);
   const updateComplaintStatus = useCallback((id: string, status: Complaint['status']) => {
     setComplaints((prev) => prev.map((c) => (c.id === id ? { ...c, status } : c)));
@@ -147,6 +180,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         logout,
         scans,
         addScan,
+        reports,
+        addReport,
         complaints,
         addComplaint,
         updateComplaintStatus,

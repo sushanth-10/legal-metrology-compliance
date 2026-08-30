@@ -17,6 +17,38 @@ export type View = AuthRoute | PageKey;
 
 export type ComplianceStatus = 'compliant' | 'non-compliant' | 'needs-review';
 
+export type ReportStatus = 'compliant' | 'non-compliant' | 'needs-review';
+
+export interface ReportCheck {
+  id: string;
+  name: string;
+  status: ReportStatus;
+  value: string;
+  requirement: string;
+  explanation: string;
+  evidence: string;
+}
+
+export interface GeneratedReport {
+  id: string;
+  scanId: string;
+  productName: string;
+  generatedAt: string;
+  applicationName: string;
+  reportTitle: string;
+  overallStatus: ComplianceStatus;
+  summary: {
+    violations: number;
+    review: number;
+    compliant: number;
+    total: number;
+  };
+  checks: ReportCheck[];
+  location?: string;
+  category?: string;
+  imageUrl?: string;
+}
+
 export type DeclarationKey =
   | 'manufacturer'
   | 'productName'
