@@ -20,7 +20,8 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
-load_dotenv()
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
 
 from compliance_engine import (
     ComplianceEngine,
@@ -49,6 +50,135 @@ if not logger.handlers:
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash").strip()
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
+SUPABASE_SECRET_KEY = (os.getenv("SUPABASE_SECRET_KEY") or "").strip()
+SUPABASE_STORAGE_BUCKET = (os.getenv("SUPABASE_STORAGE_BUCKET") or "scan-images").strip() or "scan-images"
+SUPABASE_STORAGE_SIGNED_URL_TTL = max(60, int(os.getenv("SUPABASE_STORAGE_SIGNED_URL_TTL", "3600")))
+MAX_UPLOAD_BYTES = max(1, int(os.getenv("MAX_UPLOAD_BYTES", "10485760")))
+ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _slugify_storage_object_name(filename: str) -> str:
+    name = Path(filename or "upload").name
+    stem = Path(name).stem
+    suffix = Path(name).suffix.lower()
+    safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-._") or "upload"
+    safe_suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else ".jpg"
+    return f"{safe_stem}{safe_suffix}"
+
+
+def _build_supabase_storage_key(user_id: str, scan_id: str, filename: str, unique_suffix: str | None = None) -> str:
+    generated_name = _slugify_storage_object_name(filename)
+    if unique_suffix:
+        generated_name = f"{unique_suffix}-{generated_name}"
+    return f"{SUPABASE_STORAGE_BUCKET}/{user_id}/{scan_id}/{generated_name}"
+
+
+def _supabase_storage_client() -> Any | None:
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        logger.warning("Supabase Storage is not configured: missing SUPABASE_URL or SUPABASE_SECRET_KEY in the backend .env file.")
+        return None
+    try:
+        from supabase import create_client
+    except ImportError:
+        logger.warning("Supabase Python client is not installed. Install requirements.txt to enable Storage uploads.")
+        return None
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+    except Exception as error:
+        logger.warning("Supabase client initialization failed: %s", error)
+        return None
+
+
+def _supabase_bucket_names(response: Any) -> set[str]:
+    """Support supabase-py versions that return either a list or a response object."""
+    items = getattr(response, "data", response) or []
+    names: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            name = item.get("name")
+        else:
+            name = getattr(item, "name", None)
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _ensure_supabase_storage_bucket(client: Any) -> None:
+    try:
+        response = client.storage.list_buckets()
+        names = _supabase_bucket_names(response)
+        if SUPABASE_STORAGE_BUCKET not in names:
+            result = client.storage.create_bucket(SUPABASE_STORAGE_BUCKET, public=False)
+            if getattr(result, "error", None):
+                raise RuntimeError(str(getattr(result, "error")))
+            logger.info("Created Supabase Storage bucket %s.", SUPABASE_STORAGE_BUCKET)
+    except Exception as error:
+        raise RuntimeError(f"Supabase Storage bucket '{SUPABASE_STORAGE_BUCKET}' could not be validated or created: {error}") from error
+
+
+def _supabase_storage_signed_url(storage_ref: str | None) -> str:
+    if not storage_ref:
+        return ""
+    if storage_ref.startswith("http://") or storage_ref.startswith("https://"):
+        return storage_ref
+    if storage_ref.startswith("/"):
+        return storage_ref
+
+    bucket_name = SUPABASE_STORAGE_BUCKET
+    if storage_ref.startswith(f"{bucket_name}/"):
+        object_key = storage_ref[len(bucket_name) + 1:]
+    else:
+        object_key = storage_ref
+
+    if not object_key:
+        return ""
+
+    client = _supabase_storage_client()
+    if not client:
+        logger.warning("Supabase Storage is not configured; cannot generate a signed URL for %s.", storage_ref)
+        return ""
+
+    try:
+        response = client.storage.from_(bucket_name).create_signed_url(object_key, expires_in=SUPABASE_STORAGE_SIGNED_URL_TTL)
+        url = response and getattr(response, "data", None)
+        if isinstance(url, dict):
+            signed = url.get("signedUrl") or url.get("url")
+            if isinstance(signed, str) and signed:
+                return signed
+        if isinstance(response, dict):
+            signed = response.get("signedUrl") or response.get("url")
+            if isinstance(signed, str) and signed:
+                return signed
+    except Exception as error:
+        logger.warning("Could not generate a signed URL for Supabase object %s: %s", storage_ref, error)
+    return ""
+
+
+def _upload_to_supabase_storage(user_id: str, scan_id: str, filename: str, mime_type: str, data: bytes) -> str:
+    client = _supabase_storage_client()
+    if not client:
+        raise RuntimeError("Supabase Storage is not configured. Add SUPABASE_URL and SUPABASE_SECRET_KEY to the backend .env file and create the scan-images bucket in Supabase.")
+
+    _ensure_supabase_storage_bucket(client)
+    storage_ref = _build_supabase_storage_key(user_id, scan_id, filename, uuid.uuid4().hex[:12])
+    object_key = storage_ref.replace(f"{SUPABASE_STORAGE_BUCKET}/", "", 1)
+
+    try:
+        upload_response = client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+            path=object_key,
+            file=data,
+            file_options={"content-type": mime_type or "application/octet-stream"},
+        )
+        if hasattr(upload_response, "error") and upload_response.error:
+            raise RuntimeError(str(upload_response.error))
+        if isinstance(upload_response, dict) and upload_response.get("error"):
+            raise RuntimeError(str(upload_response["error"]))
+    except Exception as error:
+        logger.warning("Supabase Storage upload failed for user %s, scan %s, file %s: %s", user_id, scan_id, filename, error)
+        raise RuntimeError(f"Supabase Storage upload failed for {filename}: {error}") from error
+
+    return storage_ref
 
 
 class LoginRequest(BaseModel):
@@ -142,13 +272,17 @@ def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]], cursor: Any =
         try:
             cursor.execute("SELECT image_ref FROM scan_images WHERE scan_id = %s ORDER BY sort_index", (scan["scan_id"],))
             image_rows = cursor.fetchall()
-            normalized_images = [row["image_ref"] for row in image_rows if row.get("image_ref")]
+            normalized_images = [
+                _supabase_storage_signed_url(row["image_ref"]) or row["image_ref"]
+                for row in image_rows
+                if row.get("image_ref")
+            ]
         except Exception:
             pass
-    
+
     # Fallback to legacy image_ref if no images found
     if not normalized_images and scan.get("image_ref"):
-        normalized_images = [scan["image_ref"]]
+        normalized_images = [_supabase_storage_signed_url(scan["image_ref"]) or scan["image_ref"]]
     
     score = scan.get("compliance_score")
     if score is None:
@@ -711,9 +845,13 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
             raise HTTPException(status_code=400, detail="Each uploaded file must include a name.")
         if not upload.content_type or not upload.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail=f"Unsupported file type for {upload.filename}. Please upload images only.")
+        if upload.content_type not in ALLOWED_IMAGE_MIME_TYPES:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type for {upload.filename}. Allowed types are JPG, PNG, or WebP.")
         data = await upload.read()
         if not data:
             raise HTTPException(status_code=400, detail=f"The uploaded file {upload.filename} is empty.")
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"The uploaded file {upload.filename} exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB size limit.")
         loaded.append((upload.filename, upload.content_type, data))
 
     ocr_texts = await asyncio.to_thread(_run_google_vision_ocr, loaded)
@@ -742,12 +880,14 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
     compliance_score = _calculate_compliance_score(checks)
     image_refs = []
     image_metadata_list = []
-    
+    storage_refs: list[str] = []
+
     try:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
         with connect() as connection:
             with connection.cursor() as cursor:
-                # Insert scan with all images and compliance score
+                # Create the parent scan before its scan_images rows so the
+                # scan_images.scan_id foreign key is satisfied.
                 cursor.execute(
                     """
                     INSERT INTO scans (scan_id, user_id, product_name, overall_status, image_ref, image_metadata, extracted_data, compliance_score)
@@ -758,25 +898,29 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
                      json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {}), "ocr_texts": ocr_texts}),
                      compliance_score),
                 )
-                
-                # Save all images to scan_images table
+
                 for index, (filename, mime_type, data) in enumerate(loaded, 1):
                     image_filename = f"{uuid.uuid4().hex}{Path(filename).suffix.lower() or '.jpg'}"
                     image_path = STORAGE_DIR / image_filename
                     image_path.write_bytes(data)
-                    image_ref = f"/api/uploads/{image_filename}"
-                    image_refs.append(image_ref)
-                    
+                    local_image_ref = f"/api/uploads/{image_filename}"
+                    image_refs.append(local_image_ref)
+
+                    storage_ref = _upload_to_supabase_storage(user["id"], scan_id, filename, mime_type, data)
+                    storage_refs.append(storage_ref)
+
                     scan_image_id = new_id("scan_image")
                     cursor.execute(
                         """
                         INSERT INTO scan_images (scan_image_id, scan_id, image_ref, filename, mime_type, sort_index)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         """,
-                        (scan_image_id, scan_id, image_ref, filename, mime_type, index),
+                        (scan_image_id, scan_id, storage_ref, filename, mime_type, index),
                     )
-                
-                # Insert compliance results
+
+                primary_storage_ref = storage_refs[0] if storage_refs else ""
+                cursor.execute("UPDATE scans SET image_ref = %s WHERE scan_id = %s", (primary_storage_ref, scan_id))
+
                 for outcome in result.outcomes:
                     cursor.execute(
                         """
@@ -785,10 +929,10 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
                         """,
                         (scan_id, outcome.rule_id, outcome.status.value, outcome.evidence or None, outcome.legal_reference, outcome.explanation, outcome.evidence or None),
                     )
-                
+
                 connection.commit()
-    except Exception as e:
-        # Clean up any saved images on failure
+    except Exception as error:
+        logger.warning("Scan storage failed for user %s, scan %s: %s", user["id"], scan_id, error)
         for image_ref in image_refs:
             try:
                 filename = image_ref.split("/")[-1]
@@ -796,7 +940,7 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
                 image_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        raise HTTPException(status_code=503, detail="The scan was analyzed but could not be saved. Check the PostgreSQL connection and storage permissions.")
+        raise HTTPException(status_code=503, detail=(str(error) if isinstance(error, RuntimeError) else "The scan was analyzed but could not be saved. Check the PostgreSQL connection and Supabase Storage configuration."))
 
     scan = _get_scan(scan_id, user)
     if not scan:

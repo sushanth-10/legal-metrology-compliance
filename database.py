@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
-
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
 STORAGE_DIR = Path(os.getenv("IMAGE_STORAGE_DIR", str(ROOT / "storage"))).resolve()
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "")
 
