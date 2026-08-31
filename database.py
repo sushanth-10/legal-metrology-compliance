@@ -71,7 +71,18 @@ CREATE TABLE IF NOT EXISTS scans (
     scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     image_ref TEXT,
     image_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    extracted_data JSONB NOT NULL DEFAULT '{}'::jsonb
+    extracted_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    compliance_score INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS scan_images (
+    scan_image_id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    image_ref TEXT NOT NULL,
+    filename TEXT,
+    mime_type TEXT,
+    sort_index INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS compliance_results (
@@ -100,13 +111,16 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE INDEX IF NOT EXISTS scans_user_id_scanned_at_idx ON scans(user_id, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS compliance_results_scan_id_idx ON compliance_results(scan_id);
 CREATE INDEX IF NOT EXISTS reports_generated_at_idx ON reports(generated_at DESC);
+CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index);
 """
-
 
 def init_db() -> None:
     with connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute(SCHEMA_SQL)
+            cursor.execute("ALTER TABLE scans ADD COLUMN IF NOT EXISTS compliance_score INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("CREATE TABLE IF NOT EXISTS scan_images (scan_image_id TEXT PRIMARY KEY, scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE, image_ref TEXT NOT NULL, filename TEXT, mime_type TEXT, sort_index INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+            cursor.execute("CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index)")
             seed_users(cursor)
         connection.commit()
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)

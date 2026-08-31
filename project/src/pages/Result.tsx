@@ -48,13 +48,34 @@ const statusConfig: Record<
 };
 
 function EvidenceImage({
-  image,
+  images,
   boxes,
+  onImageChange,
+  currentImageIndex,
 }: {
-  image: string;
+  images: string[];
   boxes: BoundingBox[];
+  onImageChange?: (index: number) => void;
+  currentImageIndex?: number;
 }) {
   const [open, setOpen] = useState(false);
+  const imageIndex = currentImageIndex ?? 0;
+  const image = images[imageIndex] || images[0];
+  const totalImages = images.length;
+  const showNavigation = totalImages > 1;
+
+  const handlePrevious = () => {
+    if (onImageChange && imageIndex > 0) {
+      onImageChange(imageIndex - 1);
+    }
+  };
+
+  const handleNext = () => {
+    if (onImageChange && imageIndex < totalImages - 1) {
+      onImageChange(imageIndex + 1);
+    }
+  };
+
   return (
     <>
       <div className="relative rounded-xl overflow-hidden bg-ink-100 aspect-[4/5] sm:aspect-square border border-ink-200">
@@ -76,6 +97,35 @@ function EvidenceImage({
             </span>
           </div>
         ))}
+        
+        {/* Image navigation overlay */}
+        {showNavigation && (
+          <>
+            <button
+              onClick={handlePrevious}
+              disabled={imageIndex === 0}
+              className="absolute left-2 top-1/2 -translate-y-1/2 bg-ink-900/60 hover:bg-ink-900/80 disabled:opacity-50 disabled:cursor-not-allowed text-white p-2 rounded-full transition-all"
+              title="Previous image"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <button
+              onClick={handleNext}
+              disabled={imageIndex === totalImages - 1}
+              className="absolute right-2 top-1/2 -translate-y-1/2 bg-ink-900/60 hover:bg-ink-900/80 disabled:opacity-50 disabled:cursor-not-allowed text-white p-2 rounded-full transition-all"
+              title="Next image"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-ink-900/70 text-white px-3 py-1.5 rounded-full text-sm font-semibold">
+              {imageIndex + 1} / {totalImages}
+            </div>
+          </>
+        )}
       </div>
       <button
         onClick={() => setOpen(true)}
@@ -129,6 +179,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
   const [showMrp, setShowMrp] = useState(true);
   const [previewReport, setPreviewReport] = useState<GeneratedReport | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [currentImageIndex, setCurrentImageIndex] = useState(0);
 
   if (!scan) return null;
 
@@ -137,6 +188,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
   const total = scan.declarations.length;
   const boxes = scan.declarations.map((d) => d.region).filter(Boolean) as BoundingBox[];
   const generatedReport = reports.find((report) => report.scanId === scan.id) ?? null;
+  const images = scan.images && scan.images.length > 0 ? scan.images : [scan.image];
 
   const handleGeneratePdfReport = async () => {
     if (role !== 'officer') return;
@@ -211,6 +263,22 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
         </div>
       </div>
 
+      {/* Compliance Score card */}
+      <div className="card p-6 border-l-4 border-brand-500 bg-brand-50">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-brand-700 uppercase tracking-wide">Compliance Score</p>
+            <p className="text-3xl font-bold text-brand-900 mt-2">{scan.complianceScore} / 100</p>
+            <p className="text-xs text-brand-700 mt-2">This score represents a Legal Metrology compliance assessment and is not a legally binding certification. Officer review required before regulatory action.</p>
+          </div>
+          <div className="text-right">
+            <div className="w-24 h-24 rounded-full border-4 border-brand-200 flex items-center justify-center bg-white">
+              <span className="text-2xl font-bold text-brand-700">{Math.round((scan.complianceScore / 100) * 100)}%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Declaration checklist */}
         <div className="card p-5 sm:p-6">
@@ -259,7 +327,12 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
             <h3 className="font-semibold text-ink-900">Image Evidence</h3>
             <span className="text-xs text-ink-500">{boxes.length} regions</span>
           </div>
-          <EvidenceImage image={scan.image} boxes={boxes} />
+          <EvidenceImage 
+            images={images} 
+            boxes={boxes}
+            currentImageIndex={currentImageIndex}
+            onImageChange={setCurrentImageIndex}
+          />
           <div className="flex flex-wrap gap-2 mt-4">
             <span className="badge bg-brand-50 text-brand-700">
               <span className="w-2 h-2 rounded-full bg-brand-500" /> Detected

@@ -8,6 +8,7 @@ import re
 import dataclasses
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,17 @@ def _package_data(package: ExtractedPackage) -> dict[str, Any]:
     return json_value(dataclasses.asdict(package))
 
 
-def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+def _calculate_compliance_score(results: list[dict[str, Any]]) -> int:
+    applicable = [item for item in results if (item.get("status") or "").upper() != "NOT_APPLICABLE"]
+    if not applicable:
+        return 100
+    violations = sum(1 for item in applicable if (item.get("status") or "").upper() == "VIOLATION")
+    review = sum(1 for item in applicable if (item.get("status") or "").upper() in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED"})
+    score = 100 - (violations * 25) - (review * 10)
+    return max(0, min(100, score))
+
+
+def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]], cursor: Any = None) -> dict[str, Any]:
     extracted = scan.get("extracted_data") or {}
     fields = extracted.get("fields") or {}
     def field_value(name: str, fallback: str = "—") -> str:
@@ -123,11 +134,30 @@ def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, 
         for item in results if item["status"] == "VIOLATION"
     ]
     scanned_at = iso_datetime(scan["scanned_at"])
+    
+    # Retrieve all images from scan_images table if cursor provided
+    normalized_images = []
+    if cursor:
+        try:
+            cursor.execute("SELECT image_ref FROM scan_images WHERE scan_id = %s ORDER BY sort_index", (scan["scan_id"],))
+            image_rows = cursor.fetchall()
+            normalized_images = [row["image_ref"] for row in image_rows if row.get("image_ref")]
+        except Exception:
+            pass
+    
+    # Fallback to legacy image_ref if no images found
+    if not normalized_images and scan.get("image_ref"):
+        normalized_images = [scan["image_ref"]]
+    
+    score = scan.get("compliance_score")
+    if score is None:
+        score = _calculate_compliance_score(results)
     return {
         "id": scan["scan_id"],
         "scan_id": scan["scan_id"],
         "product": scan.get("product_name") or "Product name unavailable",
-        "image": scan.get("image_ref") or "",
+        "image": normalized_images[0] if normalized_images else (scan.get("image_ref") or ""),
+        "images": normalized_images,
         "date": scanned_at,
         "status": {"COMPLIANT": "compliant", "VIOLATION": "non-compliant"}.get(scan["overall_status"], "needs-review"),
         "violations": len(violations),
@@ -137,6 +167,7 @@ def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, 
         "location": None,
         "extractedData": extracted,
         "checks": results,
+        "complianceScore": int(score),
     }
 
 
@@ -166,7 +197,7 @@ def _get_scan(scan_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
             scan = cursor.fetchone()
             if not scan or scan["user_id"] != user["id"]:
                 return None
-            return _scan_dto(scan, _result_rows(cursor, scan_id))
+            return _scan_dto(scan, _result_rows(cursor, scan_id), cursor)
 
 
 def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +207,13 @@ def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: di
         "violations": sum(1 for item in checks if item["status"] == "VIOLATION"),
         "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"}),
     }
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, dict):
+        score = metadata.get("compliance_score")
+    else:
+        score = None
+    if score is None:
+        score = _calculate_compliance_score(checks)
     return {
         "id": row["report_id"], "report_id": row["report_id"], "scanId": row["scan_id"], "scan_id": row["scan_id"],
         "productName": row.get("product_name") or "Product name unavailable", "generatedAt": iso_datetime(row["generated_at"]),
@@ -186,6 +224,7 @@ def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: di
             "id": str(item["id"]), "name": item["label"], "status": {"COMPLIANT": "compliant", "VIOLATION": "non-compliant"}.get(item["status"], "needs-review"),
             "value": item["value"], "requirement": item["reference"], "explanation": item["explanation"], "evidence": item["evidence"], "confidence": item.get("confidence"),
         } for item in checks], "pdfUrl": f"/api/reports/{row['report_id']}/pdf", "extractedData": extracted,
+        "complianceScore": int(score),
     }
 
 
@@ -665,21 +704,44 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
             }
         )
     scan_id = new_id("scan")
-    image_filename = f"{uuid.uuid4().hex}{Path(loaded[0][0]).suffix.lower() or '.jpg'}"
-    image_path = STORAGE_DIR / image_filename
+    compliance_score = _calculate_compliance_score(checks)
+    image_refs = []
+    image_metadata_list = []
+    
     try:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        image_path.write_bytes(loaded[0][2])
         with connect() as connection:
             with connection.cursor() as cursor:
+                # Insert scan with all images and compliance score
                 cursor.execute(
                     """
-                    INSERT INTO scans (scan_id, user_id, product_name, overall_status, image_ref, image_metadata, extracted_data)
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    INSERT INTO scans (scan_id, user_id, product_name, overall_status, image_ref, image_metadata, extracted_data, compliance_score)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
                     """,
                     (scan_id, user["id"], package.generic_name.value or "Product name unavailable", result.overall_status.value,
-                     f"/api/uploads/{image_filename}", json.dumps({"filename": loaded[0][0], "mime_type": loaded[0][1], "image_count": len(loaded)}),
-                     json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {}), "ocr_texts": ocr_texts})),                )
+                     "", json.dumps({"image_count": len(loaded)}),
+                     json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {}), "ocr_texts": ocr_texts}),
+                     compliance_score),
+                )
+                
+                # Save all images to scan_images table
+                for index, (filename, mime_type, data) in enumerate(loaded, 1):
+                    image_filename = f"{uuid.uuid4().hex}{Path(filename).suffix.lower() or '.jpg'}"
+                    image_path = STORAGE_DIR / image_filename
+                    image_path.write_bytes(data)
+                    image_ref = f"/api/uploads/{image_filename}"
+                    image_refs.append(image_ref)
+                    
+                    scan_image_id = new_id("scan_image")
+                    cursor.execute(
+                        """
+                        INSERT INTO scan_images (scan_image_id, scan_id, image_ref, filename, mime_type, sort_index)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (scan_image_id, scan_id, image_ref, filename, mime_type, index),
+                    )
+                
+                # Insert compliance results
                 for outcome in result.outcomes:
                     cursor.execute(
                         """
@@ -688,23 +750,69 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
                         """,
                         (scan_id, outcome.rule_id, outcome.status.value, outcome.evidence or None, outcome.legal_reference, outcome.explanation, outcome.evidence or None),
                     )
-            connection.commit()
-    except Exception:
-        try:
-            image_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+                
+                connection.commit()
+    except Exception as e:
+        # Clean up any saved images on failure
+        for image_ref in image_refs:
+            try:
+                filename = image_ref.split("/")[-1]
+                image_path = STORAGE_DIR / filename
+                image_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise HTTPException(status_code=503, detail="The scan was analyzed but could not be saved. Check the PostgreSQL connection and storage permissions.")
 
     scan = _get_scan(scan_id, user)
     if not scan:
         raise HTTPException(status_code=503, detail="The scan was saved but could not be loaded.")
+    
+    # Automatically generate PDF report
+    report_id = new_id("report")
+    generated_at = datetime.now(UTC)
+    pdf_path = STORAGE_DIR / "reports" / f"{report_id}.pdf"
+    try:
+        pdf_report = {
+            "report_id": report_id,
+            "scan_id": scan_id,
+            "product_name": scan.get("product") or "Product name unavailable",
+            "overall_status": result.overall_status.value,
+            "scanned_at": scan.get("date"),
+            "generated_at": generated_at,
+            "officer_name": user.get("name", "Unknown"),
+            "status": result.overall_status.value,
+            "extracted_data": scan.get("extractedData", {}),
+            "checks": scan.get("checks", []),
+            "summary": {
+                "total_checks": len(scan.get("checks", [])),
+                "compliant": sum(1 for item in scan.get("checks", []) if item.get("status") == "COMPLIANT"),
+                "violations": sum(1 for item in scan.get("checks", []) if item.get("status") == "VIOLATION"),
+                "review": sum(1 for item in scan.get("checks", []) if item.get("status") in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})
+            },
+            "compliance_score": scan.get("complianceScore", 0),
+            "images": image_refs
+        }
+        create_pdf(pdf_report, pdf_path)
+        
+        # Store report in database
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO reports (report_id, scan_id, generated_by, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)",
+                    (report_id, scan_id, user["id"], generated_at, str(pdf_path), result.overall_status.value, json.dumps({"compliance_score": compliance_score, "generator": "reportlab"}))
+                )
+                connection.commit()
+    except Exception as pdf_error:
+        logger.warning("PDF generation failed for scan %s: %s. Scan is still saved.", scan_id, pdf_error)
+        report_id = None
+    
     return {
         "overall_status": result.overall_status.value,
         "checks": checks,
         "coverage": payload.get("image_coverage", {"overall": "UNKNOWN", "minimum_required_surfaces_covered": False, "notes": ""}),
         "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})},
         "scan": scan,
+        "report_id": report_id,
     }
 
 
@@ -725,7 +833,7 @@ async def list_scans(authorization: str | None = Header(default=None)) -> list[d
             with connection.cursor() as cursor:
                 cursor.execute("SELECT * FROM scans WHERE user_id = %s ORDER BY scanned_at DESC", (user["id"],))
                 rows = cursor.fetchall()
-                return [_scan_dto(row, _result_rows(cursor, row["scan_id"])) for row in rows]
+                return [_scan_dto(row, _result_rows(cursor, row["scan_id"]), cursor) for row in rows]
     except Exception:
         raise HTTPException(status_code=503, detail="Scan history is temporarily unavailable.")
 
@@ -747,7 +855,7 @@ def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | Non
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT r.*, s.product_name, s.user_id, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, u.name AS officer_name
+                SELECT r.*, s.product_name, s.user_id, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, s.compliance_score, u.name AS officer_name
                 FROM reports r JOIN scans s ON s.scan_id = r.scan_id JOIN users u ON u.id = r.generated_by
                 WHERE r.report_id = %s
                 """, (report_id,),
@@ -761,6 +869,16 @@ def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | Non
             elif row["user_id"] != user["id"]:
                 return None
             row["status"] = row["scan_status"]
+            # Add compliance_score to the row metadata for _report_dto to use
+            if not row.get("metadata"):
+                row["metadata"] = {}
+            elif isinstance(row["metadata"], str):
+                try:
+                    row["metadata"] = json.loads(row["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    row["metadata"] = {}
+            if isinstance(row["metadata"], dict):
+                row["metadata"]["compliance_score"] = row.get("compliance_score")
             return _report_dto(row, _result_rows(cursor, row["scan_id"]), row.get("extracted_data") or {})
 
 
@@ -779,9 +897,9 @@ async def generate_report(scan_id: str, authorization: str | None = Header(defau
                 generated_at = datetime.now(UTC)
                 row = {"report_id": report_id, "scan_id": scan_id, "product_name": scan.get("product_name"), "overall_status": scan["overall_status"], "scanned_at": scan["scanned_at"], "generated_at": generated_at, "officer_name": user["name"]}
                 pdf_path = STORAGE_DIR / "reports" / f"{report_id}.pdf"
-                pdf_report = {**row, "status": scan["overall_status"], "extracted_data": scan.get("extracted_data") or {}, "checks": checks, "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})}}
+                pdf_report = {**row, "status": scan["overall_status"], "extracted_data": scan.get("extracted_data") or {}, "checks": checks, "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})}, "compliance_score": scan.get("compliance_score", 0)}
                 create_pdf(pdf_report, pdf_path)
-                cursor.execute("INSERT INTO reports (report_id, scan_id, generated_by, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)", (report_id, scan_id, user["id"], generated_at, str(pdf_path), scan["overall_status"], json.dumps({"generator": "reportlab"})))
+                cursor.execute("INSERT INTO reports (report_id, scan_id, generated_by, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)", (report_id, scan_id, user["id"], generated_at, str(pdf_path), scan["overall_status"], json.dumps({"compliance_score": scan.get("compliance_score", 0), "generator": "reportlab"})))
             connection.commit()
         created = _report_record(report_id, user)
         if not created:
