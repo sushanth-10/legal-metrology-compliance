@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
 import dataclasses
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,10 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+logger = logging.getLogger("niriksha")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
@@ -157,7 +164,7 @@ def _get_scan(scan_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
         with connection.cursor() as cursor:
             cursor.execute("SELECT * FROM scans WHERE scan_id = %s", (scan_id,))
             scan = cursor.fetchone()
-            if not scan or (user["role"] != "officer" and scan["user_id"] != user["id"]):
+            if not scan or scan["user_id"] != user["id"]:
                 return None
             return _scan_dto(scan, _result_rows(cursor, scan_id))
 
@@ -430,17 +437,97 @@ def _build_extraction_prompt() -> str:
     """
 
 
-async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
+def _google_vision_available() -> bool:
+    credentials_json = (os.getenv("GOOGLE_CLOUD_VISION_CREDENTIALS_JSON") or "").strip()
+    has_credentials_file = bool((os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip())
+    return bool(credentials_json or has_credentials_file)
+
+
+def _normalize_ocr_text(raw_text: str) -> str:
+    if not raw_text:
+        return ""
+    lines = []
+    seen: set[str] = set()
+    for line in re.split(r"\r?\n+", raw_text):
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if not cleaned:
+            continue
+        if len(cleaned) > 200:
+            cleaned = " ".join(cleaned.split())
+        if cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        lines.append(cleaned)
+    return "\n".join(lines).strip()
+
+
+def _build_ocr_summary(raw_ocr: str) -> str:
+    text = _normalize_ocr_text(raw_ocr)
+    if not text:
+        return ""
+    lines = [line for line in text.splitlines() if line.strip()]
+    summary_lines = []
+    for line in lines[:20]:
+        if len(line) > 250:
+            summary_lines.append(line[:250].rstrip())
+        else:
+            summary_lines.append(line)
+    return "\n".join(summary_lines)
+
+
+def _run_google_vision_ocr(images: list[tuple[str, str, bytes]]) -> list[str]:
+    if not _google_vision_available():
+        logger.warning("Google Cloud Vision credentials are not configured; skipping OCR.")
+        return []
+
+    try:
+        from google.cloud import vision_v1
+        from google.oauth2 import service_account
+    except ImportError:
+        logger.warning("google-cloud-vision is not installed; continuing without OCR.")
+        return []
+
+    credential_json = (os.getenv("GOOGLE_CLOUD_VISION_CREDENTIALS_JSON") or "").strip()
+    try:
+        client_kwargs: dict[str, Any] = {}
+        if credential_json:
+            client_kwargs["credentials"] = service_account.Credentials.from_service_account_info(json.loads(credential_json))
+        client = vision_v1.ImageAnnotatorClient(**client_kwargs)
+
+        def _ocr_one(item: tuple[str, str, bytes]) -> str:
+            _, mime_type, data = item
+            if not mime_type.startswith("image/"):
+                return ""
+            image = vision_v1.Image(content=data)
+            response = client.document_text_detection(image=image)
+            annotation = response.full_text_annotation
+            text = annotation.text if annotation and annotation.text else ""
+            return _normalize_ocr_text(text)
+
+        with ThreadPoolExecutor(max_workers=min(4, max(len(images), 1))) as executor:
+            return list(executor.map(_ocr_one, images))
+    except Exception as error:
+        logger.warning("Google Cloud Vision OCR failed; falling back to Gemini-only analysis: %s", error)
+        return []
+
+
+async def _call_gemini(images: list[tuple[str, str, bytes]], ocr_texts: list[str] | None = None) -> dict[str, Any]:
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not api_key:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is empty. Add your key to the project .env file before running the backend.")
 
     client = genai.Client(api_key=api_key)
     contents: list[Any] = []
-    for filename, mime_type, data in images:
+    ocr_texts = ocr_texts or []
+    for index, (filename, mime_type, data) in enumerate(images):
         contents.append(types.Part.from_bytes(data=data, mime_type=mime_type))
-        contents.append(f"Image: {filename}\n")
-    contents.append(_build_extraction_prompt())
+        raw_ocr = ocr_texts[index] if index < len(ocr_texts) else ""
+        summary = _build_ocr_summary(raw_ocr)
+        if summary:
+            contents.append(f"Image: {filename}\nGoogle Vision OCR (cleaned summary):\n{summary}\n")
+        else:
+            contents.append(f"Image: {filename}\nGoogle Vision OCR: unavailable for this image.\n")
+    contents.append("Keep the response compact, valid JSON, and do not add declarations that are not visible. Use OCR text only as supporting evidence; do not invent missing declarations.\n" + _build_extraction_prompt())
 
     try:
         response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
@@ -555,7 +642,8 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
             raise HTTPException(status_code=400, detail=f"The uploaded file {upload.filename} is empty.")
         loaded.append((upload.filename, upload.content_type, data))
 
-    payload = await _call_gemini(loaded)
+    ocr_texts = await asyncio.to_thread(_run_google_vision_ocr, loaded)
+    payload = await _call_gemini(loaded, ocr_texts)
     package = _extract_package(payload)
     result = ComplianceEngine().evaluate(package)
 
@@ -591,8 +679,7 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
                     """,
                     (scan_id, user["id"], package.generic_name.value or "Product name unavailable", result.overall_status.value,
                      f"/api/uploads/{image_filename}", json.dumps({"filename": loaded[0][0], "mime_type": loaded[0][1], "image_count": len(loaded)}),
-                     json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {})})),
-                )
+                     json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {}), "ocr_texts": ocr_texts})),                )
                 for outcome in result.outcomes:
                     cursor.execute(
                         """
@@ -636,10 +723,7 @@ async def list_scans(authorization: str | None = Header(default=None)) -> list[d
     try:
         with connect() as connection:
             with connection.cursor() as cursor:
-                if user["role"] == "officer":
-                    cursor.execute("SELECT * FROM scans ORDER BY scanned_at DESC")
-                else:
-                    cursor.execute("SELECT * FROM scans WHERE user_id = %s ORDER BY scanned_at DESC", (user["id"],))
+                cursor.execute("SELECT * FROM scans WHERE user_id = %s ORDER BY scanned_at DESC", (user["id"],))
                 rows = cursor.fetchall()
                 return [_scan_dto(row, _result_rows(cursor, row["scan_id"])) for row in rows]
     except Exception:
@@ -663,7 +747,7 @@ def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | Non
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT r.*, s.product_name, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, u.name AS officer_name
+                SELECT r.*, s.product_name, s.user_id, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, u.name AS officer_name
                 FROM reports r JOIN scans s ON s.scan_id = r.scan_id JOIN users u ON u.id = r.generated_by
                 WHERE r.report_id = %s
                 """, (report_id,),
@@ -671,7 +755,10 @@ def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | Non
             row = cursor.fetchone()
             if not row:
                 return None
-            if user["role"] != "officer" and row["generated_by"] != user["id"]:
+            if user["role"] == "officer":
+                if row["generated_by"] != user["id"]:
+                    return None
+            elif row["user_id"] != user["id"]:
                 return None
             row["status"] = row["scan_status"]
             return _report_dto(row, _result_rows(cursor, row["scan_id"]), row.get("extracted_data") or {})
@@ -712,7 +799,13 @@ async def list_reports(authorization: str | None = Header(default=None)) -> list
     try:
         with connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT r.report_id FROM reports r ORDER BY r.generated_at DESC")
+                if user["role"] == "officer":
+                    cursor.execute("SELECT r.report_id FROM reports r WHERE r.generated_by = %s ORDER BY r.generated_at DESC", (user["id"],))
+                else:
+                    cursor.execute(
+                        "SELECT r.report_id FROM reports r JOIN scans s ON s.scan_id = r.scan_id WHERE s.user_id = %s ORDER BY r.generated_at DESC",
+                        (user["id"],),
+                    )
                 ids = [row["report_id"] for row in cursor.fetchall()]
         return [item for report_id in ids if (item := _report_record(report_id, user))]
     except HTTPException:
@@ -740,9 +833,17 @@ async def download_report(report_id: str, authorization: str | None = Header(def
     try:
         with connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT pdf_path, product_name FROM reports r JOIN scans s ON s.scan_id = r.scan_id WHERE r.report_id = %s", (report_id,))
+                cursor.execute(
+                    "SELECT r.pdf_path, s.product_name, s.user_id, r.generated_by FROM reports r JOIN scans s ON s.scan_id = r.scan_id WHERE r.report_id = %s",
+                    (report_id,),
+                )
                 row = cursor.fetchone()
         if not row:
+            raise HTTPException(status_code=404, detail="Report not found.")
+        if user["role"] == "officer":
+            if row["generated_by"] != user["id"]:
+                raise HTTPException(status_code=404, detail="Report not found.")
+        elif row["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail="Report not found.")
         path = Path(row["pdf_path"]).resolve()
         if not path.is_file() or STORAGE_DIR not in path.parents:
