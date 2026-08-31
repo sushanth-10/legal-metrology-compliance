@@ -7,7 +7,18 @@ import { apiBaseUrl, apiJson } from '@/lib/api';
 const STORAGE_KEY = 'niriksha_session';
 
 function normalizeScan(scan: Scan): Scan {
-  return scan.image?.startsWith('/') ? { ...scan, image: `${apiBaseUrl()}${scan.image}` } : scan;
+  const normalizeImageList = (values?: string[]) =>
+    values
+      ? values.map((value) => (value && value.startsWith('/') ? `${apiBaseUrl()}${value}` : value))
+      : undefined;
+
+  const imageUrls = normalizeImageList(scan.images);
+  const primaryImage = scan.image?.startsWith('/') ? `${apiBaseUrl()}${scan.image}` : scan.image;
+  return {
+    ...scan,
+    image: primaryImage,
+    images: imageUrls && imageUrls.length > 0 ? imageUrls : primaryImage ? [primaryImage] : undefined,
+  };
 }
 
 interface StoredSession {

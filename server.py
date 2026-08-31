@@ -48,6 +48,7 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash").strip()
 
 
 class LoginRequest(BaseModel):
@@ -568,26 +569,60 @@ async def _call_gemini(images: list[tuple[str, str, bytes]], ocr_texts: list[str
             contents.append(f"Image: {filename}\nGoogle Vision OCR: unavailable for this image.\n")
     contents.append("Keep the response compact, valid JSON, and do not add declarations that are not visible. Use OCR text only as supporting evidence; do not invent missing declarations.\n" + _build_extraction_prompt())
 
-    try:
-        response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
-    except Exception as error:
-        error_text = str(error)
-        if (
-            getattr(error, "status_code", None) == 401
-            or "UNAUTHENTICATED" in error_text
-            or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_text
-        ):
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Gemini rejected GEMINI_API_KEY. Create a fresh Gemini API key in Google AI Studio, "
-                    "replace GEMINI_API_KEY in the backend .env file, and restart Uvicorn."
-                ),
-            ) from error
+    models_to_try = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL not in models_to_try:
+        models_to_try.append(GEMINI_FALLBACK_MODEL)
+
+    response = None
+    last_error: Exception | None = None
+    for model in models_to_try:
+        try:
+            response = client.models.generate_content(model=model, contents=contents)
+            if model != GEMINI_MODEL:
+                logger.info("Gemini primary model %s was unavailable; scan completed with fallback model %s.", GEMINI_MODEL, model)
+            break
+        except Exception as error:
+            last_error = error
+            error_text = str(error)
+            status_code = getattr(error, "status_code", None)
+            is_auth_error = (
+                status_code == 401
+                or "UNAUTHENTICATED" in error_text
+                or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_text
+            )
+            is_quota_error = status_code == 429 or "RESOURCE_EXHAUSTED" in error_text or "quota" in error_text.lower()
+
+            if is_auth_error:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Gemini rejected GEMINI_API_KEY. Create a fresh Gemini API key in Google AI Studio, "
+                        "replace GEMINI_API_KEY in the backend .env file, and restart Uvicorn."
+                    ),
+                ) from error
+            if is_quota_error and model == models_to_try[-1]:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Gemini request quota is exhausted for the configured models. "
+                        "Wait for the quota to reset, enable billing, or configure a Gemini API key from another project."
+                    ),
+                ) from error
+            if not is_quota_error:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Gemini image analysis is temporarily unavailable. Check the backend log and try again.",
+                ) from error
+            logger.warning("Gemini model %s quota is exhausted; trying fallback model %s.", model, GEMINI_FALLBACK_MODEL)
+
+    if response is None:
         raise HTTPException(
-            status_code=502,
-            detail="Gemini image analysis is temporarily unavailable. Check the backend log and try again.",
-        ) from error
+            status_code=429,
+            detail=(
+                "Gemini request quota is exhausted for the configured models. "
+                "Wait for the quota to reset, enable billing, or configure a Gemini API key from another project."
+            ),
+        ) from last_error
     text = getattr(response, "text", None)
     if not text:
         text = ""

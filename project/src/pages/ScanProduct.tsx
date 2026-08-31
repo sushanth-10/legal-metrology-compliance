@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'r
 import { AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronUp, Circle, CircleAlert, Eye, FileImage, FileText, ImageIcon, Info, Loader2, Plus, RotateCcw, ScanLine, SearchCheck, ShieldCheck, Sparkles, Upload, X } from 'lucide-react';
 import { InfoNote, PageHeader } from '@/components/ui';
 import { useApp } from '@/store';
-import { apiFetch, apiJson } from '@/lib/api';
+import { apiBaseUrl, apiFetch, apiJson } from '@/lib/api';
 import type { GeneratedReport, Scan } from '@/types';
 
 type Mode = 'report' | 'advanced';
@@ -24,7 +24,23 @@ type ScanApiResponse = {
   coverage?: { overall?: string; minimum_required_surfaces_covered?: boolean; notes?: string };
   summary?: { total_checks: number; compliant: number; violations: number; review: number };
   scan?: Scan;
+  report_id?: string | null;
 };
+
+function normalizeScan(scan: Scan): Scan {
+  const normalizeImageList = (values?: string[]) =>
+    values
+      ? values.map((value) => (value && value.startsWith('/') ? `${apiBaseUrl()}${value}` : value))
+      : undefined;
+
+  const imageUrls = normalizeImageList(scan.images);
+  const primaryImage = scan.image?.startsWith('/') ? `${apiBaseUrl()}${scan.image}` : scan.image;
+  return {
+    ...scan,
+    image: primaryImage,
+    images: imageUrls && imageUrls.length > 0 ? imageUrls : primaryImage ? [primaryImage] : undefined,
+  };
+}
 
 /** Future Gemini/OCR contract: observations only; Python compliance_engine owns the legal decision. */
 type ExtractedField = { value: string | null; visibility: Visibility; readable: boolean; confidence: number | null; sourceImage: number | null };
@@ -134,7 +150,7 @@ function PersistedReportActions({ result }: { result: ScanApiResponse | null }) 
 }
 
 export function ScanProduct() {
-  const { addScan } = useApp();
+  const { addScan, addReport, role } = useApp();
   const [slots, setSlots] = useState<Array<ImageItem | null>>([null, null]);
   const [stage, setStage] = useState<Stage>('upload');
   const [mode, setMode] = useState<Mode>('report');
@@ -302,7 +318,20 @@ export function ScanProduct() {
       }
 
       setUploadError(null);
-      if (payload.scan) addScan(payload.scan);
+      if (payload.scan) {
+        const normalizedScan = normalizeScan(payload.scan);
+        addScan(normalizedScan);
+        if (role === 'officer' && normalizedScan.id && payload.report_id) {
+          try {
+            const savedReport = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(payload.report_id)}`);
+            if (savedReport?.id) {
+              addReport(savedReport);
+            }
+          } catch (reportError) {
+            console.warn('Persisted report was not available immediately after scan:', reportError);
+          }
+        }
+      }
       setResult(payload);
       setStage(scanMode === 'advanced' ? 'advanced' : 'report');
     } catch (error) {

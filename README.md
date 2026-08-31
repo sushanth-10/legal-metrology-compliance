@@ -11,7 +11,7 @@ AI-powered compliance checking of packaged commodities under Legal Metrology rul
    py -3 -m pip install -r requirements.txt
    ```
 
-3. Copy `.env.example` to `.env` and set `DATABASE_URL`, `TOKEN_SECRET`, and `GEMINI_API_KEY`. Keep `.env` private; it is ignored by Git. Set `VITE_API_BASE_URL` in `project/.env` to the same port used by Uvicorn (for example, `http://127.0.0.1:8003`). Restart Vite after changing it.
+3. Copy `.env.example` to `.env` and set `DATABASE_URL`, `TOKEN_SECRET`, and `GEMINI_API_KEY`. `GEMINI_MODEL` is the primary model and `GEMINI_FALLBACK_MODEL` is used if the primary model reaches its quota. Keep `.env` private; it is ignored by Git. Set `VITE_API_BASE_URL` in `project/.env` to the same port used by Uvicorn (for example, `http://127.0.0.1:8003`). Restart Vite after changing it.
 4. Initialize the schema and idempotent demo users in Supabase:
 
    ```powershell

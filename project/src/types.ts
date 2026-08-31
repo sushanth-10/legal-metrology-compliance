@@ -93,6 +93,7 @@ export interface Scan {
   id: string;
   product: string;
   image: string;
+  images?: string[];
   date: string;
   status: ComplianceStatus;
   violations: number;
@@ -106,6 +107,7 @@ export interface Scan {
   scan_id?: string;
   extractedData?: Record<string, unknown>;
   checks?: Array<{ id: string | number; label: string; status: string; value: string; reference: string; explanation: string; evidence?: string; confidence?: number | null }>;
+  complianceScore?: number;
 }
 
 export type ComplaintStatus = 'new' | 'review' | 'investigating' | 'resolved';
