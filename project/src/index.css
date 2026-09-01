@@ -79,3 +79,124 @@
     -webkit-tap-highlight-color: transparent;
   }
 }
+
+/* The application uses light Tailwind utility classes throughout. These
+   theme overrides keep the existing screens and components consistent when
+   the saved dark-mode preference is enabled. */
+html.dark {
+  color-scheme: dark;
+}
+
+html.dark body {
+  background-color: #11151f;
+  color: #eef0f4;
+}
+
+html.dark .bg-white,
+html.dark .bg-white\/85 {
+  background-color: #1d2233;
+}
+
+html.dark .bg-ink-50 {
+  background-color: #11151f;
+}
+
+html.dark .bg-ink-100 {
+  background-color: #2f3548;
+}
+
+html.dark .bg-ink-200 {
+  background-color: #424a60;
+}
+
+html.dark .text-ink-900 {
+  color: #f7f8fa;
+}
+
+html.dark .text-ink-800 {
+  color: #eef0f4;
+}
+
+html.dark .text-ink-700 {
+  color: #dde1e9;
+}
+
+html.dark .text-ink-600 {
+  color: #c2c8d6;
+}
+
+html.dark .text-ink-500 {
+  color: #9aa2b5;
+}
+
+html.dark .text-ink-400 {
+  color: #727b93;
+}
+
+html.dark .border-ink-100 {
+  border-color: #2f3548;
+}
+
+html.dark .border-ink-200 {
+  border-color: #424a60;
+}
+
+html.dark .border-ink-300 {
+  border-color: #565f78;
+}
+
+html.dark .card {
+  background-color: #1d2233;
+  border-color: #424a60;
+}
+
+html.dark .input {
+  background-color: #1d2233;
+  border-color: #424a60;
+  color: #f7f8fa;
+}
+
+html.dark .btn-secondary {
+  background-color: #1d2233;
+  border-color: #424a60;
+  color: #eef0f4;
+}
+
+html.dark .btn-secondary:hover {
+  background-color: #2f3548;
+  border-color: #565f78;
+}
+
+html.dark .nav-item:hover,
+html.dark .hover\:bg-ink-100:hover {
+  background-color: #2f3548;
+}
+
+html.dark .nav-item-active {
+  background-color: #1b3488;
+  color: #f7f8fa;
+}
+
+html.dark .bg-brand-50 {
+  background-color: #18264f;
+}
+
+html.dark .text-brand-700 {
+  color: #bcd2ff;
+}
+
+html.dark .bg-success-50 {
+  background-color: #12382d;
+}
+
+html.dark .bg-warning-50 {
+  background-color: #3d2d0b;
+}
+
+html.dark .bg-danger-50 {
+  background-color: #421d24;
+}
+
+html.dark .ring-white {
+  --tw-ring-color: #1d2233;
+}

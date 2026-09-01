@@ -188,7 +188,7 @@ export function OfficerRegistration() {
           features={[
             { icon: <BadgeCheck className="w-4 h-4 text-white" />, text: 'Conduct field compliance inspections' },
             { icon: <FileText className="w-4 h-4 text-white" />, text: 'Generate official compliance reports' },
-            { icon: <ShieldCheck className="w-4 h-4 text-white" />, text: 'Manage and resolve consumer complaints' },
+            { icon: <ShieldCheck className="w-4 h-4 text-white" />, text: 'Manage and resolve product complaints' },
           ]}
         />
       }

@@ -13,20 +13,24 @@ import { Profile } from '@/pages/Profile';
 import { Settings } from '@/pages/Settings';
 import { Login } from '@/pages/Login';
 import { Signup } from '@/pages/Signup';
-import { ConsumerRegistration } from '@/pages/ConsumerRegistration';
+import { AdminLogin } from '@/pages/AdminLogin';
+import { OrganizationRegistration } from '@/pages/OrganizationRegistration';
 import { OfficerRegistration } from '@/pages/OfficerRegistration';
+import { AdminDashboard } from '@/pages/AdminDashboard';
 import type { PageKey, View } from '@/types';
 
-const officerOnly: PageKey[] = ['analytics', 'violation-map', 'reports'];
+const adminOnly: PageKey[] = ['analytics', 'violation-map'];
 
 function AuthPage({ view }: { view: View }) {
   switch (view) {
     case 'login':
       return <Login />;
+    case 'admin-login':
+      return <AdminLogin />;
     case 'signup':
       return <Signup />;
-    case 'signup-consumer':
-      return <ConsumerRegistration />;
+    case 'signup-organization':
+      return <OrganizationRegistration />;
     case 'signup-officer':
       return <OfficerRegistration />;
     default:
@@ -43,19 +47,19 @@ function CurrentPage() {
 
   const page = view as PageKey;
 
-  if (officerOnly.includes(page) && role !== 'officer') {
+  if (adminOnly.includes(page) && role !== 'admin') {
     return <Dashboard />;
   }
 
   switch (page) {
     case 'dashboard':
-      return <Dashboard />;
+      return role === 'admin' ? <AdminDashboard /> : <Dashboard />;
     case 'scan':
       return <ScanProduct />;
     case 'history':
       return <ScanHistory />;
     case 'complaints':
-      return <Complaints />;
+      return role === 'admin' ? <AdminDashboard initialSection="complaints" /> : <Complaints />;
     case 'analytics':
       return <Analytics />;
     case 'violation-map':

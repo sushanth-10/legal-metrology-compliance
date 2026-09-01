@@ -1,4 +1,4 @@
-"""Initialize the PostgreSQL schema and idempotently seed demo users."""
+"""Initialize the PostgreSQL schema without creating demo accounts."""
 
 from pathlib import Path
 
@@ -11,4 +11,4 @@ from database import init_db
 
 if __name__ == "__main__":
     init_db()
-    print("NIRIKSHA PostgreSQL schema initialized; demo users ensured.")
+    print("NIRIKSHA PostgreSQL schema initialized.")

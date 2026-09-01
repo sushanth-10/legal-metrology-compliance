@@ -57,16 +57,54 @@ CREATE TABLE IF NOT EXISTS users (
     login_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('consumer', 'officer')),
+    -- Legacy consumer rows are retained for data preservation, but the API
+    -- only permits organization, officer, and admin authentication.
+    role TEXT NOT NULL CHECK (role IN ('consumer', 'organization', 'officer', 'admin')),
     email TEXT,
     location TEXT,
+    state TEXT,
+    district TEXT,
     officer_id TEXT,
+    organization_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id TEXT PRIMARY KEY,
+    organization_name TEXT NOT NULL,
+    organization_type TEXT,
+    official_email TEXT,
+    official_mobile TEXT,
+    password_hash TEXT NOT NULL,
+    registered_address TEXT,
+    state TEXT,
+    district TEXT,
+    pin_code TEXT,
+    gstin TEXT,
+    registration_number TEXT,
+    authorized_representative_name TEXT,
+    authorized_representative_designation TEXT,
+    authorized_representative_contact TEXT,
+    website TEXT,
+    industry TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admins (
+    id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    admin_name TEXT NOT NULL,
+    official_email TEXT,
+    department TEXT,
+    state TEXT,
+    district TEXT,
+    administrative_role TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS scans (
     scan_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
     product_name TEXT,
     overall_status TEXT NOT NULL,
     scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -103,55 +141,288 @@ CREATE TABLE IF NOT EXISTS reports (
     report_id TEXT PRIMARY KEY,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
     generated_by TEXT NOT NULL REFERENCES users(id),
+    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     pdf_path TEXT NOT NULL,
     status TEXT NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS complaints (
+    complaint_id TEXT PRIMARY KEY,
+    scan_id TEXT,
+    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+    product_name TEXT NOT NULL,
+    product_category TEXT,
+    complaint_category TEXT,
+    complaint_description TEXT,
+    complaint_location TEXT,
+    state TEXT,
+    district TEXT,
+    submitted_by TEXT,
+    status TEXT NOT NULL DEFAULT 'NEW',
+    priority TEXT DEFAULT 'MEDIUM',
+    admin_remark TEXT,
+    evidence_images JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS complaint_status_history (
+    history_id TEXT PRIMARY KEY,
+    complaint_id TEXT NOT NULL REFERENCES complaints(complaint_id) ON DELETE CASCADE,
+    previous_status TEXT,
+    new_status TEXT NOT NULL,
+    changed_by TEXT REFERENCES users(id),
+    administrative_remark TEXT,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS scans_user_id_scanned_at_idx ON scans(user_id, scanned_at DESC);
+CREATE INDEX IF NOT EXISTS scans_organization_id_idx ON scans(organization_id);
 CREATE INDEX IF NOT EXISTS compliance_results_scan_id_idx ON compliance_results(scan_id);
 CREATE INDEX IF NOT EXISTS reports_generated_at_idx ON reports(generated_at DESC);
+CREATE INDEX IF NOT EXISTS reports_organization_id_idx ON reports(organization_id);
 CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index);
+CREATE INDEX IF NOT EXISTS complaints_status_idx ON complaints(status);
+CREATE INDEX IF NOT EXISTS complaint_history_complaint_id_idx ON complaint_status_history(complaint_id, changed_at DESC);
 """
+
+def _column_exists(cursor: psycopg.Cursor[Any], table_name: str, column_name: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+        (table_name, column_name),
+    )
+    return cursor.fetchone() is not None
+
+
+def _add_column_if_missing(cursor: psycopg.Cursor[Any], table_name: str, column_name: str, column_sql: str) -> None:
+    if _column_exists(cursor, table_name, column_name):
+        return
+    cursor.execute(column_sql)
+
+
+def _ensure_role_constraint(cursor: psycopg.Cursor[Any]) -> None:
+    cursor.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check")
+    cursor.execute(
+        "ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('consumer', 'organization', 'officer', 'admin'))"
+    )
+
 
 def init_db() -> None:
     with connect() as connection:
         with connection.cursor() as cursor:
-            cursor.execute(SCHEMA_SQL)
-            cursor.execute("ALTER TABLE scans ADD COLUMN IF NOT EXISTS compliance_score INTEGER NOT NULL DEFAULT 0")
-            cursor.execute("CREATE TABLE IF NOT EXISTS scan_images (scan_image_id TEXT PRIMARY KEY, scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE, image_ref TEXT NOT NULL, filename TEXT, mime_type TEXT, sort_index INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
-            cursor.execute("CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index)")
-            seed_users(cursor)
+            for table_sql in [
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    login_id TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('consumer', 'organization', 'officer', 'admin')),
+                    email TEXT,
+                    location TEXT,
+                    state TEXT,
+                    district TEXT,
+                    officer_id TEXT,
+                    organization_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS organizations (
+                    id TEXT PRIMARY KEY,
+                    organization_name TEXT NOT NULL,
+                    organization_type TEXT,
+                    official_email TEXT,
+                    official_mobile TEXT,
+                    password_hash TEXT NOT NULL,
+                    registered_address TEXT,
+                    state TEXT,
+                    district TEXT,
+                    pin_code TEXT,
+                    gstin TEXT,
+                    registration_number TEXT,
+                    authorized_representative_name TEXT,
+                    authorized_representative_designation TEXT,
+                    authorized_representative_contact TEXT,
+                    website TEXT,
+                    industry TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS admins (
+                    id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    admin_name TEXT NOT NULL,
+                    official_email TEXT,
+                    department TEXT,
+                    state TEXT,
+                    district TEXT,
+                    administrative_role TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS scans (
+                    scan_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+                    product_name TEXT,
+                    overall_status TEXT NOT NULL,
+                    scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    image_ref TEXT,
+                    image_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    extracted_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    compliance_score INTEGER NOT NULL DEFAULT 0
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS scan_images (
+                    scan_image_id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    image_ref TEXT NOT NULL,
+                    filename TEXT,
+                    mime_type TEXT,
+                    sort_index INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS compliance_results (
+                    id BIGSERIAL PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    check_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    extracted_value TEXT,
+                    applicable_requirement TEXT,
+                    explanation TEXT NOT NULL,
+                    evidence TEXT,
+                    confidence NUMERIC,
+                    source_image INTEGER
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS reports (
+                    report_id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    generated_by TEXT NOT NULL REFERENCES users(id),
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+                    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    pdf_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS complaints (
+                    complaint_id TEXT PRIMARY KEY,
+                    scan_id TEXT,
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+                    product_name TEXT NOT NULL,
+                    product_category TEXT,
+                    complaint_category TEXT,
+                    complaint_description TEXT,
+                    complaint_location TEXT,
+                    state TEXT,
+                    district TEXT,
+                    submitted_by TEXT,
+                    status TEXT NOT NULL DEFAULT 'NEW',
+                    priority TEXT DEFAULT 'MEDIUM',
+                    admin_remark TEXT,
+                    evidence_images JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS complaint_status_history (
+                    history_id TEXT PRIMARY KEY,
+                    complaint_id TEXT NOT NULL REFERENCES complaints(complaint_id) ON DELETE CASCADE,
+                    previous_status TEXT,
+                    new_status TEXT NOT NULL,
+                    changed_by TEXT REFERENCES users(id),
+                    administrative_remark TEXT,
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+            ]:
+                cursor.execute(table_sql)
+
+            _add_column_if_missing(cursor, 'users', 'role', "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'organization' CHECK (role IN ('consumer', 'organization', 'officer', 'admin'))")
+            _add_column_if_missing(cursor, 'users', 'state', 'ALTER TABLE users ADD COLUMN IF NOT EXISTS state TEXT')
+            _add_column_if_missing(cursor, 'users', 'district', 'ALTER TABLE users ADD COLUMN IF NOT EXISTS district TEXT')
+            _add_column_if_missing(cursor, 'users', 'organization_id', 'ALTER TABLE users ADD COLUMN IF NOT EXISTS organization_id TEXT')
+            _add_column_if_missing(cursor, 'scans', 'organization_id', 'ALTER TABLE scans ADD COLUMN IF NOT EXISTS organization_id TEXT')
+            _add_column_if_missing(cursor, 'reports', 'organization_id', 'ALTER TABLE reports ADD COLUMN IF NOT EXISTS organization_id TEXT')
+            _add_column_if_missing(cursor, 'scans', 'compliance_score', 'ALTER TABLE scans ADD COLUMN IF NOT EXISTS compliance_score INTEGER NOT NULL DEFAULT 0')
+            _add_column_if_missing(cursor, 'organizations', 'organization_type', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS organization_type TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'official_mobile', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS official_mobile TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'registered_address', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS registered_address TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'state', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS state TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'district', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS district TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'pin_code', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS pin_code TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'gstin', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS gstin TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'registration_number', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS registration_number TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'authorized_representative_name', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS authorized_representative_name TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'authorized_representative_designation', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS authorized_representative_designation TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'authorized_representative_contact', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS authorized_representative_contact TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'website', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS website TEXT')
+            _add_column_if_missing(cursor, 'organizations', 'industry', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS industry TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'scan_id', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS scan_id TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'organization_id', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS organization_id TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'state', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS state TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'district', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS district TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'admin_remark', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS admin_remark TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'updated_at', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
+            _add_column_if_missing(cursor, 'complaint_status_history', 'administrative_remark', 'ALTER TABLE complaint_status_history ADD COLUMN IF NOT EXISTS administrative_remark TEXT')
+            _add_column_if_missing(cursor, 'complaint_status_history', 'changed_at', 'ALTER TABLE complaint_status_history ADD COLUMN IF NOT EXISTS changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
+            _ensure_role_constraint(cursor)
+
+            if _column_exists(cursor, 'scans', 'organization_id'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS scans_organization_id_idx ON scans(organization_id)")
+            if _column_exists(cursor, 'reports', 'organization_id'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS reports_organization_id_idx ON reports(organization_id)")
+            if _column_exists(cursor, 'scan_images', 'scan_id'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index)")
+            if _column_exists(cursor, 'complaints', 'status'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS complaints_status_idx ON complaints(status)")
+            if _column_exists(cursor, 'complaint_status_history', 'complaint_id'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS complaint_history_complaint_id_idx ON complaint_status_history(complaint_id, changed_at DESC)")
+
+            if _column_exists(cursor, 'scans', 'user_id'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS scans_user_id_scanned_at_idx ON scans(user_id, scanned_at DESC)")
+            if _column_exists(cursor, 'compliance_results', 'scan_id'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS compliance_results_scan_id_idx ON compliance_results(scan_id)")
+            if _column_exists(cursor, 'reports', 'generated_at'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS reports_generated_at_idx ON reports(generated_at DESC)")
+
         connection.commit()
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def seed_users(cursor: psycopg.Cursor[Any]) -> None:
-    users = [
-        ("user-consumer-demo", "user123", "Demo Consumer", "consumer", "consumer@example.in", None),
-        ("user-officer-demo", "officer123", "Demo Officer", "officer", "officer@example.in", "LM-DEMO-001"),
-    ]
-    for user_id, login_id, name, role, email, officer_id in users:
-        cursor.execute(
-            """
-            INSERT INTO users (id, login_id, name, password_hash, role, email, location, officer_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (login_id) DO NOTHING
-            """,
-            (user_id, login_id, name, _password_hash("123456"), role, email, "Bengaluru", officer_id),
-        )
-
-
-def create_user(login_id: str, password: str, name: str, role: str, email: str | None = None) -> dict[str, Any]:
+def create_user(login_id: str, password: str, name: str, role: str, email: str | None = None, *, state: str | None = None, district: str | None = None, organization_name: str | None = None, organization_type: str | None = None, official_mobile: str | None = None, registered_address: str | None = None, pin_code: str | None = None, gstin: str | None = None, registration_number: str | None = None, authorized_representative_name: str | None = None, authorized_representative_designation: str | None = None, authorized_representative_contact: str | None = None, website: str | None = None, industry: str | None = None) -> dict[str, Any]:
     user_id = new_id("user")
     with connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO users (id, login_id, name, password_hash, role, email, location) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, login_id, name, _password_hash(password), role, email, "Bengaluru"),
+                "INSERT INTO users (id, login_id, name, password_hash, role, email, location, state, district) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (user_id, login_id, name, _password_hash(password), role, email, registered_address or district or state or "", state, district),
             )
             user = cursor.fetchone()
+            if role == "organization":
+                organization_id = new_id("org")
+                cursor.execute(
+                    "INSERT INTO organizations (id, organization_name, organization_type, official_email, official_mobile, password_hash, registered_address, state, district, pin_code, gstin, registration_number, authorized_representative_name, authorized_representative_designation, authorized_representative_contact, website, industry) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (organization_id, organization_name or name, organization_type or "Other", email or "", official_mobile or "", _password_hash(password), registered_address or "", state or "", district or "", pin_code or "", gstin or "", registration_number or "", authorized_representative_name or "", authorized_representative_designation or "", authorized_representative_contact or "", website or "", industry or ""),
+                )
+                cursor.execute("UPDATE users SET organization_id = %s WHERE id = %s", (organization_id, user_id))
+                user["organization_id"] = organization_id
+            if role == "admin":
+                cursor.execute(
+                    "INSERT INTO admins (id, admin_name, official_email, department, state, district, administrative_role) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (user_id, name, email or "", "Legal Metrology", state or "Bengaluru", district or "Bengaluru", "District Admin"),
+                )
         connection.commit()
     return user
 

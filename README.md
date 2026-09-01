@@ -1,31 +1,129 @@
-# NIRIKSHA Legal Metrology Compliance
+# NIRIKSHA
 
-AI-powered compliance checking of packaged commodities under Legal Metrology rules. The existing Gemini extraction and Python `compliance_engine` remain the source of scan results; PostgreSQL stores the authenticated users, real scans, rule outcomes, and generated reports.
+NIRIKSHA is an AI-powered compliance monitoring platform for packaged commodities under Indian legal metrology requirements. The system helps organizations, officers, and administrators assess product compliance by scanning packaging, extracting key information from labels, validating it against legal rules, and generating compliance reports and complaint workflows.
 
-## Local setup
+## Project Overview
 
-1. Create or open your Supabase project. In the Supabase dashboard, open **Connect**, choose **Shared Pooler → Session mode**, and copy its PostgreSQL connection string. Session mode uses the IPv4-compatible Supavisor endpoint and is suitable for this persistent Python backend.
-2. Install Python dependencies from the repository root:
+The platform is designed around a role-based workflow:
+
+- Organization users register and scan packaged products
+- Officers manage inspections and review outcomes
+- Admins monitor complaints, update status, and oversee compliance operations
+- The backend stores scanned data, compliance outcomes, reports, complaints, and evidence in PostgreSQL/Supabase
+
+The application combines OCR, AI extraction, rule-based validation, document generation, and secure storage into a single compliance workflow.
+
+## Core Features
+
+- Product image upload and scan intake
+- OCR-based extraction using Google Cloud Vision
+- AI interpretation using Google Gemini
+- Rule-based compliance evaluation through the Python compliance engine
+- Organization, officer, and admin authentication flows
+- Complaint registration and admin-driven status management
+- Report generation in PDF format
+- Evidence image storage and scan history tracking
+- Supabase-backed cloud storage and database persistence
+
+## Technology Stack
+
+### Frontend
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+- JavaScript/HTML/CSS
+- Lucide React icons
+
+### Backend
+- Python
+- FastAPI
+- Uvicorn
+- PostgreSQL access through psycopg
+- Token-based authentication and secure session handling
+
+### AI and OCR
+- Google Cloud Vision OCR
+- Google Gemini AI
+- Python compliance engine for validation logic
+
+### Database and Storage
+- PostgreSQL
+- Supabase Postgres
+- Supabase Storage
+- Prisma tooling for project configuration
+
+### Reporting and Documents
+- ReportLab for PDF generation
+- jsPDF for frontend document handling
+
+### Supporting Tools
+- Python dotenv for environment management
+- ESLint for frontend linting
+- Node.js tooling for Vite and project setup
+
+## Architecture
+
+The application follows a modular flow:
+
+1. User uploads a product image or package image
+2. Backend validates the request and authenticates the user
+3. OCR extracts text from the label and packaging
+4. Gemini interprets the extracted content
+5. Python compliance engine compares results to legal metrology rules
+6. Compliance results are stored in PostgreSQL
+7. A PDF report is generated and saved
+8. Evidence images and scan metadata are stored in Supabase Storage
+9. Complaints and status updates are tracked for admin/officer review
+
+## Role-Based Model
+
+The application is structured around three main operational roles:
+
+- Organization: registers and scans products, manages its compliance records
+- Officer: reviews and supports compliance operations
+- Admin: manages complaints, updates workflow status, and oversees system operations
+
+## Security Considerations
+
+- Sensitive credentials are kept in environment variables, not in frontend code
+- PostgreSQL and Gemini keys are not exposed to the browser
+- Passwords are stored using PBKDF2 hashing
+- Supabase keys and storage are managed through backend configuration
+
+## Project Structure
+
+- `server.py` — FastAPI backend and API routes
+- `database.py` — database initialization, schema creation, auth helpers, and seed users
+- `pdf_reports.py` — PDF report generation
+- `compliance_engine/` — rule-based compliance evaluation logic
+- `project/` — React frontend application
+- `storage/` — local storage for evidence and reports
+- `tests/` — application test files
+
+## Local Setup
+
+1. Install Python dependencies:
 
    ```powershell
    py -3 -m pip install -r requirements.txt
    ```
 
-3. Copy `.env.example` to `.env` and set `DATABASE_URL`, `TOKEN_SECRET`, and `GEMINI_API_KEY`. `GEMINI_MODEL` is the primary model and `GEMINI_FALLBACK_MODEL` is used if the primary model reaches its quota. Keep `.env` private; it is ignored by Git. Set `VITE_API_BASE_URL` in `project/.env` to the same port used by Uvicorn (for example, `http://127.0.0.1:8003`). Restart Vite after changing it.
-4. Initialize the schema and idempotent demo users in Supabase:
+2. Configure environment variables in `.env` with your database, Gemini, and Supabase values.
+
+3. Initialize the database schema:
 
    ```powershell
    py -3 db_init.py
    ```
 
-   The backend also runs the same initialization automatically at startup. The created PostgreSQL tables are `users`, `scans`, `compliance_results`, and `reports`.
-5. Start the backend from the repository root:
+4. Start the backend:
 
    ```powershell
-   py -3 -m uvicorn server:app --host 127.0.0.1 --port 8003
+   py -3 -m uvicorn server:app --host 127.0.0.1 --port 8001
    ```
 
-6. In a second terminal, install and start the frontend:
+5. Start the frontend from the `project` folder:
 
    ```powershell
    cd project
@@ -33,21 +131,6 @@ AI-powered compliance checking of packaged commodities under Legal Metrology rul
    npm run dev
    ```
 
-7. If this database contains scans created before shared Supabase Storage was enabled, migrate the legacy local images from the computer that still has them:
+## Notes
 
-   ```powershell
-   py -3 migrate_local_images.py
-   ```
-
-   This uploads available legacy images to the private `scan-images` bucket and updates their database references. Images whose original local files are no longer available are reported and cannot be recovered by the application.
-
-## Development accounts
-
-- Officer: `officer123` / `123456` — can generate, view, and download official reports.
-- Consumer: `user123` / `123456` — can scan and view only their own scan history; official report generation is unavailable.
-
-The login screen's CAPTCHA remains a presentation-level prototype control. Passwords are stored as PBKDF2 hashes, and the API issues a signed short-lived session token. PostgreSQL credentials and Gemini keys are never sent to the browser.
-
-## Persistence workflow
-
-`POST /api/scan` authenticates the user, runs the unchanged Gemini → `compliance_engine` flow, stores the actual extracted observations and rule outcomes, and returns the persisted scan. Officers can call `POST /api/reports/{scan_id}` to generate a real ReportLab PDF stored under `IMAGE_STORAGE_DIR/reports`; report metadata and its `scan_id` are stored in PostgreSQL. The reports and PDF endpoints enforce officer access.
+This project combines AI-based classification, OCR, rule validation, organizational workflows, and evidence tracking into a practical compliance system intended for legal metrology enforcement. It is designed to support both operational oversight and compliance reporting in a real-world government/regulatory environment.

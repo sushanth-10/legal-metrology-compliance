@@ -2,7 +2,7 @@ import { Menu, Bell, Search } from 'lucide-react';
 import { useApp } from '@/store';
 
 export function Topbar() {
-  const { user, setMobileNavOpen } = useApp();
+  const { user, setMobileNavOpen, t } = useApp();
 
   return (
     <header className="sticky top-0 z-20 bg-white/85 backdrop-blur border-b border-ink-200">
@@ -11,7 +11,7 @@ export function Topbar() {
           <button
             className="lg:hidden btn-ghost -ml-1 p-2"
             onClick={() => setMobileNavOpen(true)}
-            aria-label="Open menu"
+            aria-label={t('openMenu')}
           >
             <Menu className="w-5 h-5" />
           </button>
@@ -19,7 +19,7 @@ export function Topbar() {
             <div className="relative">
               <Search className="w-4 h-4 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
-                placeholder="Search products, scans, complaints…"
+                placeholder={t('searchPlaceholder')}
                 className="input pl-9 w-72 max-w-full hidden md:block"
               />
             </div>

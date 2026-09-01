@@ -12,20 +12,19 @@ import {
 import { useApp } from '@/store';
 import { StatusBadge } from '@/components/ui';
 
-const stats = [
-  { label: 'Total Scans', value: 128, icon: ScanLine, tint: 'bg-brand-50 text-brand-600' },
-  { label: 'Compliant', value: 96, icon: CheckCircle2, tint: 'bg-success-50 text-success-600' },
-  { label: 'Violations Detected', value: 24, icon: XCircle, tint: 'bg-danger-50 text-danger-600' },
-  { label: 'Needs Review', value: 8, icon: AlertCircle, tint: 'bg-warning-50 text-warning-600' },
-];
-
 export function Dashboard() {
-  const { user, role, scans, setPage, setSelectedScanId } = useApp();
+  const { user, role, scans, scansLoading, setPage, setSelectedScanId } = useApp();
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
   const recent = scans.slice(0, 5);
+  const stats = [
+    { label: 'Total Scans', value: scans.length, icon: ScanLine, tint: 'bg-brand-50 text-brand-600' },
+    { label: 'Compliant', value: scans.filter((scan) => scan.status === 'compliant').length, icon: CheckCircle2, tint: 'bg-success-50 text-success-600' },
+    { label: 'Violations Detected', value: scans.reduce((total, scan) => total + Math.max(0, scan.violations || 0), 0), icon: XCircle, tint: 'bg-danger-50 text-danger-600' },
+    { label: 'Needs Review', value: scans.filter((scan) => scan.status === 'needs-review').length, icon: AlertCircle, tint: 'bg-warning-50 text-warning-600' },
+  ];
 
   return (
     <div className="space-y-7">
@@ -78,7 +77,7 @@ export function Dashboard() {
             <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${s.tint}`}>
               <s.icon className="w-5 h-5" />
             </div>
-            <p className="text-3xl font-bold text-ink-900 mt-3">{s.value}</p>
+            <p className="text-3xl font-bold text-ink-900 mt-3">{scansLoading ? '—' : s.value}</p>
             <p className="text-sm text-ink-500 mt-0.5">{s.label}</p>
           </div>
         ))}
@@ -112,7 +111,13 @@ export function Dashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-ink-100">
-              {recent.map((s) => (
+              {recent.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="table-td text-center text-ink-500 py-8">
+                    {scansLoading ? 'Loading scans…' : 'No scans recorded yet.'}
+                  </td>
+                </tr>
+              ) : recent.map((s) => (
                 <tr key={s.id} className="hover:bg-ink-50/60">
                   <td className="table-td">
                     <div className="flex items-center gap-3">
@@ -156,7 +161,11 @@ export function Dashboard() {
 
         {/* Mobile cards */}
         <div className="md:hidden divide-y divide-ink-100">
-          {recent.map((s) => (
+          {recent.length === 0 ? (
+            <p className="p-6 text-center text-sm text-ink-500">
+              {scansLoading ? 'Loading scans…' : 'No scans recorded yet.'}
+            </p>
+          ) : recent.map((s) => (
             <div key={s.id} className="p-4 flex gap-3">
               <img src={s.image} alt={s.product} className="w-14 h-14 rounded-lg object-cover" />
               <div className="flex-1 min-w-0">

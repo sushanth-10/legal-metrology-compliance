@@ -12,7 +12,7 @@ export function Signup() {
           title="Join NIRIKSHA to verify product compliance."
           subtitle="Create an account to scan packaged products, report violations, and access compliance tools."
           features={[
-            { icon: <User className="w-4 h-4 text-white" />, text: 'Consumer accounts for product verification' },
+            { icon: <User className="w-4 h-4 text-white" />, text: 'Organization accounts for product verification' },
             { icon: <BadgeCheck className="w-4 h-4 text-white" />, text: 'Officer accounts for field inspections' },
             { icon: <ShieldCheck className="w-4 h-4 text-white" />, text: 'Secure, role-based access control' },
           ]}
@@ -35,21 +35,21 @@ export function Signup() {
       <p className="text-ink-500 mt-1 text-sm">Select your account type to continue.</p>
 
       <div className="mt-6 space-y-4">
-        {/* Consumer card */}
+        {/* Organization card */}
         <button
-          onClick={() => navigate('signup-consumer')}
+          onClick={() => navigate('signup-organization')}
           className="card card-hover w-full p-5 text-left flex items-start gap-4 group"
         >
           <div className="w-12 h-12 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center shrink-0">
-            <User className="w-6 h-6" />
+            <ShieldCheck className="w-6 h-6" />
           </div>
           <div className="flex-1">
-            <h3 className="font-semibold text-ink-900">Consumer</h3>
+            <h3 className="font-semibold text-ink-900">Organization</h3>
             <p className="text-sm text-ink-500 mt-1">
-              For citizens and consumers who want to verify packaged products or report violations.
+              For manufacturers, brand owners, and compliance teams managing product declarations and complaint response.
             </p>
             <span className="inline-flex items-center gap-1.5 text-brand-600 font-semibold text-sm mt-3 group-hover:gap-2.5 transition-all">
-              Register as Consumer <ArrowRight className="w-4 h-4" />
+              Register as Organization <ArrowRight className="w-4 h-4" />
             </span>
           </div>
         </button>
@@ -72,6 +72,25 @@ export function Signup() {
             </p>
             <span className="inline-flex items-center gap-1.5 text-brand-600 font-semibold text-sm mt-3 group-hover:gap-2.5 transition-all">
               Register as Officer <ArrowRight className="w-4 h-4" />
+            </span>
+          </div>
+        </button>
+
+        {/* Admin card */}
+        <button
+          onClick={() => navigate('admin-login')}
+          className="card card-hover w-full p-5 text-left flex items-start gap-4 group opacity-90"
+        >
+          <div className="w-12 h-12 rounded-xl bg-ink-100 text-ink-700 flex items-center justify-center shrink-0">
+            <ShieldCheck className="w-6 h-6" />
+          </div>
+          <div className="flex-1">
+            <h3 className="font-semibold text-ink-900">Admin</h3>
+            <p className="text-sm text-ink-500 mt-1">
+              Government administrators manage complaint disposition and institutional oversight through a dedicated admin login.
+            </p>
+            <span className="inline-flex items-center gap-1.5 text-brand-600 font-semibold text-sm mt-3 group-hover:gap-2.5 transition-all">
+              Use Admin Login <ArrowRight className="w-4 h-4" />
             </span>
           </div>
         </button>

@@ -13,9 +13,8 @@ import {
   X,
 } from 'lucide-react';
 import type { PageKey } from '@/types';
+import type { TranslationKey } from '@/lib/i18n';
 import { useApp } from '@/store';
-
-const officerOnly: PageKey[] = ['analytics', 'violation-map', 'reports'];
 
 const nav: { key: PageKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -29,11 +28,25 @@ const nav: { key: PageKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'settings', label: 'Settings', icon: Settings },
 ];
 
+const navTranslationKeys: Record<PageKey, TranslationKey> = {
+  dashboard: 'dashboard',
+  scan: 'scanProduct',
+  history: 'scanHistory',
+  complaints: 'complaints',
+  analytics: 'analytics',
+  'violation-map': 'violationMap',
+  reports: 'reports',
+  profile: 'profile',
+  settings: 'settings',
+};
+
 export function Sidebar() {
-  const { user, role, view, setPage, mobileNavOpen, setMobileNavOpen, logout } = useApp();
+  const { user, role, view, setPage, mobileNavOpen, setMobileNavOpen, logout, t } = useApp();
   const page = view;
 
-  const items = nav.filter((n) => role === 'officer' || !officerOnly.includes(n.key));
+  const items = role === 'admin'
+    ? nav.filter((n) => ['dashboard', 'complaints', 'analytics', 'violation-map', 'profile', 'settings'].includes(n.key))
+    : nav.filter((n) => ['dashboard', 'scan', 'history', 'complaints', 'reports', 'profile', 'settings'].includes(n.key));
 
   return (
     <>
@@ -66,7 +79,7 @@ export function Sidebar() {
           <button
             className="lg:hidden text-ink-500 hover:text-ink-800 p-1"
             onClick={() => setMobileNavOpen(false)}
-            aria-label="Close menu"
+            aria-label={t('closeMenu')}
           >
             <X className="w-5 h-5" />
           </button>
@@ -74,12 +87,11 @@ export function Sidebar() {
 
         <nav className="flex-1 px-3 py-2 overflow-y-auto scrollbar-thin">
           <p className="px-3 pt-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-400">
-            Menu
+            {t('menu')}
           </p>
           <ul className="space-y-0.5">
             {items.map((item) => {
               const active = page === item.key;
-              const officerTag = officerOnly.includes(item.key);
               return (
                 <li key={item.key}>
                   <button
@@ -87,12 +99,7 @@ export function Sidebar() {
                     className={`nav-item w-full no-tap-highlight ${active ? 'nav-item-active' : ''}`}
                   >
                     <item.icon className="w-[18px] h-[18px] shrink-0" strokeWidth={2} />
-                    <span className="flex-1 text-left">{item.label}</span>
-                    {officerTag && (
-                      <span className="text-[9px] font-bold uppercase tracking-wide text-brand-500 bg-brand-50 px-1.5 py-0.5 rounded">
-                        Officer
-                      </span>
-                    )}
+                    <span className="flex-1 text-left">{t(navTranslationKeys[item.key])}</span>
                   </button>
                 </li>
               );
@@ -107,12 +114,14 @@ export function Sidebar() {
             </div>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-ink-800 truncate">{user.name}</p>
-              <p className="text-xs text-ink-500 truncate capitalize">{role === 'officer' ? 'Officer' : 'Consumer'}</p>
+              <p className="text-xs text-ink-500 truncate capitalize">
+                {role === 'organization' ? 'Organization' : role === 'officer' ? t('officer') : 'Admin'}
+              </p>
             </div>
           </div>
           <button onClick={logout} className="nav-item w-full text-danger-600 hover:bg-danger-50">
             <LogOut className="w-[18px] h-[18px]" />
-            <span>Logout</span>
+            <span>{t('logout')}</span>
           </button>
         </div>
       </aside>

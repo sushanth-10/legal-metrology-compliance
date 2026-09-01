@@ -1,6 +1,6 @@
-export type Role = 'consumer' | 'officer';
+export type Role = 'organization' | 'officer' | 'admin';
 
-export type AuthRoute = 'login' | 'signup' | 'signup-consumer' | 'signup-officer';
+export type AuthRoute = 'login' | 'admin-login' | 'signup' | 'signup-organization' | 'signup-officer';
 
 export type PageKey =
   | 'dashboard'
@@ -110,7 +110,45 @@ export interface Scan {
   complianceScore?: number;
 }
 
-export type ComplaintStatus = 'new' | 'review' | 'investigating' | 'resolved';
+export type ComplaintStatus = 'new' | 'review' | 'investigating' | 'resolved' | 'closed';
+
+export interface ComplaintStatusEvent {
+  id: string;
+  previousStatus?: string | null;
+  newStatus: string;
+  changedBy?: string | null;
+  changedAt: string;
+  administrativeRemark?: string | null;
+}
+
+export interface ComplaintFilters {
+  search?: string;
+  state?: string;
+  district?: string;
+  status?: string;
+  category?: string;
+  date?: string;
+}
+
+export interface OrganizationRegistration {
+  organizationName: string;
+  organizationType: string;
+  officialEmail: string;
+  officialMobile: string;
+  registeredAddress: string;
+  state: string;
+  district: string;
+  pinCode: string;
+  gstin: string;
+  registrationNumber: string;
+  representativeName: string;
+  representativeDesignation: string;
+  representativeContact: string;
+  password: string;
+  confirmPassword: string;
+  website?: string;
+  industry?: string;
+}
 
 export interface Complaint {
   id: string;
@@ -124,6 +162,28 @@ export interface Complaint {
   submittedBy: string;
   date: string;
   relatedScans?: number;
+  organizationId?: string | null;
+  organizationName?: string | null;
+  scanId?: string | null;
+  reportId?: string | null;
+  state?: string | null;
+  district?: string | null;
+  adminRemark?: string | null;
+  updatedAt?: string;
+  evidenceImages?: string[];
+  history?: ComplaintStatusEvent[];
+  relatedScan?: {
+    id: string;
+    product: string;
+    status: string;
+    complianceScore?: number | null;
+    scannedAt?: string | null;
+  } | null;
+  relatedReport?: {
+    id: string;
+    generatedAt?: string | null;
+    status?: string | null;
+  } | null;
 }
 
 export interface User {
@@ -132,6 +192,11 @@ export interface User {
   email: string;
   location: string;
   officerId?: string;
+  organizationId?: string;
+  organizationName?: string;
+  organizationType?: string;
+  state?: string;
+  district?: string;
   joined: string;
 }
 
