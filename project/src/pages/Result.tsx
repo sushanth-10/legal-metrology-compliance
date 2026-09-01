@@ -189,6 +189,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
   const boxes = scan.declarations.map((d) => d.region).filter(Boolean) as BoundingBox[];
   const generatedReport = reports.find((report) => report.scanId === scan.id) ?? null;
   const images = scan.images && scan.images.length > 0 ? scan.images : [scan.image];
+  const score = scan.complianceScore ?? 0;
 
   const handleGeneratePdfReport = async () => {
     if (role !== 'officer') return;
@@ -268,12 +269,12 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm font-semibold text-brand-700 uppercase tracking-wide">Compliance Score</p>
-            <p className="text-3xl font-bold text-brand-900 mt-2">{scan.complianceScore} / 100</p>
+            <p className="text-3xl font-bold text-brand-900 mt-2">{score} / 100</p>
             <p className="text-xs text-brand-700 mt-2">This score represents a Legal Metrology compliance assessment and is not a legally binding certification. Officer review required before regulatory action.</p>
           </div>
           <div className="text-right">
             <div className="w-24 h-24 rounded-full border-4 border-brand-200 flex items-center justify-center bg-white">
-              <span className="text-2xl font-bold text-brand-700">{Math.round((scan.complianceScore / 100) * 100)}%</span>
+              <span className="text-2xl font-bold text-brand-700">{Math.round((score / 100) * 100)}%</span>
             </div>
           </div>
         </div>

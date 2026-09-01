@@ -67,6 +67,7 @@ interface AppState {
   register: (loginId: string, password: string, name: string, email: string) => Promise<boolean>;
   logout: () => void;
   scans: Scan[];
+  scansLoading: boolean;
   addScan: (s: Scan) => void;
   reports: GeneratedReport[];
   addReport: (report: GeneratedReport) => void;
@@ -89,6 +90,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>('consumer');
   const [view, setViewRaw] = useState<View>('login');
   const [scans, setScans] = useState<Scan[]>([]);
+  const [scansLoading, setScansLoading] = useState(false);
   const [reports, setReports] = useState<GeneratedReport[]>([]);
   const [complaints, setComplaints] = useState<Complaint[]>(sampleComplaints);
   const [currentUser, setCurrentUser] = useState<User>(defaultUser);
@@ -109,10 +111,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) {
+      setScansLoading(false);
+      return;
+    }
     const session = loadSession();
-    if (!session?.token) return;
+    if (!session?.token) {
+      setScansLoading(false);
+      return;
+    }
     let mounted = true;
+    setScansLoading(true);
     const loadPersistentData = async () => {
       try {
         const persistedScans = await apiJson<Scan[]>('/api/scans');
@@ -126,11 +135,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error(error);
         if (mounted) console.error('Persistent NIRIKSHA data is unavailable:', error);
+      } finally {
+        if (mounted) setScansLoading(false);
       }
     };
     void loadPersistentData();
     return () => { mounted = false; };
-  }, [isAuthenticated, role, view]);
+  }, [isAuthenticated, role]);
 
   const user: User = currentUser || (role === 'officer' ? officerUser : defaultUser);
 
@@ -246,6 +257,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         register,
         logout,
         scans,
+        scansLoading,
         addScan,
         reports,
         addReport,

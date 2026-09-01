@@ -155,6 +155,76 @@ def _supabase_storage_signed_url(storage_ref: str | None) -> str:
     return ""
 
 
+def _supabase_storage_object_key(storage_ref: str) -> str:
+    bucket_prefix = f"{SUPABASE_STORAGE_BUCKET}/"
+    return storage_ref[len(bucket_prefix):] if storage_ref.startswith(bucket_prefix) else storage_ref
+
+
+def _download_storage_image(storage_ref: str | None) -> bytes | None:
+    """Read an evidence image for server-side PDF embedding.
+
+    Supabase Storage references are downloaded with the backend secret. Legacy
+    local upload references remain supported while old scans are migrated.
+    """
+    if not storage_ref:
+        return None
+    if storage_ref.startswith("/api/uploads/"):
+        try:
+            path = (STORAGE_DIR / Path(storage_ref).name).resolve()
+            if path.parent == STORAGE_DIR and path.is_file():
+                return path.read_bytes()
+        except OSError:
+            return None
+        return None
+    if storage_ref.startswith("http://") or storage_ref.startswith("https://"):
+        return None
+    client = _supabase_storage_client()
+    if not client:
+        return None
+    try:
+        response = client.storage.from_(SUPABASE_STORAGE_BUCKET).download(_supabase_storage_object_key(storage_ref))
+        if isinstance(response, bytes):
+            return response
+        if isinstance(response, bytearray):
+            return bytes(response)
+        if isinstance(response, dict) and isinstance(response.get("data"), (bytes, bytearray)):
+            return bytes(response["data"])
+    except Exception as error:
+        logger.warning("Could not download Supabase evidence image %s for PDF generation: %s", storage_ref, error)
+    return None
+
+
+def _report_image_sources(scan_id: str, cursor: Any = None) -> list[dict[str, Any]]:
+    """Return every stored scan image as a PDF-ready source, in upload order."""
+    owns_connection = cursor is None
+    connection = None
+    try:
+        if owns_connection:
+            connection = connect()
+            cursor = connection.cursor()
+        cursor.execute("SELECT image_ref, filename, sort_index FROM scan_images WHERE scan_id = %s ORDER BY sort_index, created_at", (scan_id,))
+        rows = cursor.fetchall()
+        if not rows:
+            cursor.execute("SELECT image_ref, NULL AS filename, 1 AS sort_index FROM scans WHERE scan_id = %s", (scan_id,))
+            rows = cursor.fetchall()
+        sources = []
+        for index, row in enumerate(rows, 1):
+            reference = row.get("image_ref") or ""
+            data = _download_storage_image(reference)
+            filename = row.get("filename") or Path(reference).name or "Evidence View"
+            sources.append({
+                "label": filename,
+                "bytes": data,
+                "path": (STORAGE_DIR / Path(reference).name) if reference.startswith("/api/uploads/") else None,
+                "reference": reference,
+                "sort_index": row.get("sort_index", index),
+            })
+        return sources
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _upload_to_supabase_storage(user_id: str, scan_id: str, filename: str, mime_type: str, data: bytes) -> str:
     client = _supabase_storage_client()
     if not client:
@@ -311,7 +381,8 @@ def _result_rows(cursor: Any, scan_id: str) -> list[dict[str, Any]]:
     rows = cursor.fetchall()
     return [
         {
-            "id": row["id"],
+                "id": row["id"],
+            "rule_id": row["check_name"],
             "label": row["check_name"],
             "status": row["status"],
             "value": row.get("extracted_value") or "Evidence unavailable for this assessment",
@@ -335,18 +406,60 @@ def _get_scan(scan_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
             return _scan_dto(scan, _result_rows(cursor, scan_id), cursor)
 
 
-def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: dict[str, Any]) -> dict[str, Any]:
-    summary = {
+def _report_summary(checks: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "total_checks": len(checks),
         "total": len(checks),
         "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"),
         "violations": sum(1 for item in checks if item["status"] == "VIOLATION"),
         "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"}),
     }
+
+
+def _build_pdf_report(
+    report_id: str,
+    scan: dict[str, Any],
+    checks: list[dict[str, Any]],
+    generated_at: datetime,
+    officer_name: str,
+    location: str | None,
+    images: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble one report payload from persisted scan data for all PDF callers."""
+    status = scan.get("overall_status")
+    if not status:
+        status = {"compliant": "COMPLIANT", "non-compliant": "VIOLATION"}.get(scan.get("status"), "UNABLE_TO_VERIFY")
+    score = scan.get("compliance_score")
+    if score is None:
+        score = scan.get("complianceScore")
+    if score is None:
+        # This is only a backwards-compatible fallback for scans created before
+        # the persisted score column existed. The PDF itself never calculates a score.
+        score = _calculate_compliance_score(checks)
+    return {
+        "report_id": report_id,
+        "scan_id": scan.get("scan_id") or scan.get("id"),
+        "product_name": scan.get("product_name") or scan.get("product") or "Product name unavailable",
+        "overall_status": status,
+        "status": status,
+        "scanned_at": scan.get("scanned_at") or scan.get("date"),
+        "generated_at": generated_at,
+        "officer_name": officer_name,
+        "location": location or "Not provided",
+        "extracted_data": scan.get("extracted_data") or scan.get("extractedData") or {},
+        "checks": checks,
+        "summary": _report_summary(checks),
+        "compliance_score": int(score),
+        "images": images,
+    }
+
+
+def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: dict[str, Any]) -> dict[str, Any]:
+    summary = _report_summary(checks)
     metadata = row.get("metadata") or {}
-    if isinstance(metadata, dict):
+    score = row.get("compliance_score")
+    if score is None and isinstance(metadata, dict):
         score = metadata.get("compliance_score")
-    else:
-        score = None
     if score is None:
         score = _calculate_compliance_score(checks)
     return {
@@ -359,7 +472,7 @@ def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: di
             "id": str(item["id"]), "name": item["label"], "status": {"COMPLIANT": "compliant", "VIOLATION": "non-compliant"}.get(item["status"], "needs-review"),
             "value": item["value"], "requirement": item["reference"], "explanation": item["explanation"], "evidence": item["evidence"], "confidence": item.get("confidence"),
         } for item in checks], "pdfUrl": f"/api/reports/{row['report_id']}/pdf", "extractedData": extracted,
-        "complianceScore": int(score),
+        "complianceScore": int(score), "location": row.get("inspection_location") or "Not provided",
     }
 
 
@@ -951,26 +1064,16 @@ async def scan_images(images: list[UploadFile] = File(...), authorization: str |
     generated_at = datetime.now(UTC)
     pdf_path = STORAGE_DIR / "reports" / f"{report_id}.pdf"
     try:
-        pdf_report = {
-            "report_id": report_id,
-            "scan_id": scan_id,
-            "product_name": scan.get("product") or "Product name unavailable",
-            "overall_status": result.overall_status.value,
-            "scanned_at": scan.get("date"),
-            "generated_at": generated_at,
-            "officer_name": user.get("name", "Unknown"),
-            "status": result.overall_status.value,
-            "extracted_data": scan.get("extractedData", {}),
-            "checks": scan.get("checks", []),
-            "summary": {
-                "total_checks": len(scan.get("checks", [])),
-                "compliant": sum(1 for item in scan.get("checks", []) if item.get("status") == "COMPLIANT"),
-                "violations": sum(1 for item in scan.get("checks", []) if item.get("status") == "VIOLATION"),
-                "review": sum(1 for item in scan.get("checks", []) if item.get("status") in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})
-            },
-            "compliance_score": scan.get("complianceScore", 0),
-            "images": image_refs
-        }
+        report_images = _report_image_sources(scan_id)
+        pdf_report = _build_pdf_report(
+            report_id,
+            scan,
+            scan.get("checks", []),
+            generated_at,
+            user.get("name", "Unknown"),
+            user.get("location"),
+            report_images,
+        )
         create_pdf(pdf_report, pdf_path)
         
         # Store report in database
@@ -1034,8 +1137,10 @@ def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | Non
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT r.*, s.product_name, s.user_id, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, s.compliance_score, u.name AS officer_name
+                SELECT r.*, s.product_name, s.user_id, s.overall_status AS scan_status, s.scanned_at, s.extracted_data, s.compliance_score,
+                       u.name AS officer_name, scan_user.location AS inspection_location
                 FROM reports r JOIN scans s ON s.scan_id = r.scan_id JOIN users u ON u.id = r.generated_by
+                LEFT JOIN users scan_user ON scan_user.id = s.user_id
                 WHERE r.report_id = %s
                 """, (report_id,),
             )
@@ -1067,16 +1172,23 @@ async def generate_report(scan_id: str, authorization: str | None = Header(defau
     try:
         with connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT s.*, u.name AS officer_name FROM scans s JOIN users u ON u.id = s.user_id WHERE s.scan_id = %s", (scan_id,))
+                cursor.execute("SELECT s.*, u.name AS scan_user_name, u.location AS inspection_location FROM scans s JOIN users u ON u.id = s.user_id WHERE s.scan_id = %s", (scan_id,))
                 scan = cursor.fetchone()
                 if not scan:
                     raise HTTPException(status_code=404, detail="Scan not found.")
                 checks = _result_rows(cursor, scan_id)
                 report_id = new_id("report")
                 generated_at = datetime.now(UTC)
-                row = {"report_id": report_id, "scan_id": scan_id, "product_name": scan.get("product_name"), "overall_status": scan["overall_status"], "scanned_at": scan["scanned_at"], "generated_at": generated_at, "officer_name": user["name"]}
                 pdf_path = STORAGE_DIR / "reports" / f"{report_id}.pdf"
-                pdf_report = {**row, "status": scan["overall_status"], "extracted_data": scan.get("extracted_data") or {}, "checks": checks, "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})}, "compliance_score": scan.get("compliance_score", 0)}
+                pdf_report = _build_pdf_report(
+                    report_id,
+                    {**scan, "scan_id": scan_id},
+                    checks,
+                    generated_at,
+                    user["name"],
+                    scan.get("inspection_location"),
+                    _report_image_sources(scan_id, cursor),
+                )
                 create_pdf(pdf_report, pdf_path)
                 cursor.execute("INSERT INTO reports (report_id, scan_id, generated_by, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)", (report_id, scan_id, user["id"], generated_at, str(pdf_path), scan["overall_status"], json.dumps({"compliance_score": scan.get("compliance_score", 0), "generator": "reportlab"})))
             connection.commit()

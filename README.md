@@ -33,6 +33,14 @@ AI-powered compliance checking of packaged commodities under Legal Metrology rul
    npm run dev
    ```
 
+7. If this database contains scans created before shared Supabase Storage was enabled, migrate the legacy local images from the computer that still has them:
+
+   ```powershell
+   py -3 migrate_local_images.py
+   ```
+
+   This uploads available legacy images to the private `scan-images` bucket and updates their database references. Images whose original local files are no longer available are reported and cannot be recovered by the application.
+
 ## Development accounts
 
 - Officer: `officer123` / `123456` — can generate, view, and download official reports.

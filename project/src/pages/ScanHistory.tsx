@@ -13,7 +13,7 @@ const statusOptions: { value: ComplianceStatus | 'all'; label: string }[] = [
 ];
 
 export function ScanHistory() {
-  const { scans, selectedScanId, setSelectedScanId } = useApp();
+  const { scans, scansLoading, selectedScanId, setSelectedScanId } = useApp();
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<ComplianceStatus | 'all'>('all');
   const [date, setDate] = useState('');
@@ -112,7 +112,11 @@ export function ScanHistory() {
         )}
       </div>
 
-      {filtered.length === 0 ? (
+      {scansLoading ? (
+        <div className="card p-8 text-center text-ink-500">
+          Loading your scan history…
+        </div>
+      ) : filtered.length === 0 ? (
         <EmptyState
           icon={<Search className="w-6 h-6" />}
           title="No scans found"
