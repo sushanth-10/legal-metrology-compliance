@@ -25,14 +25,14 @@ const statusConfig: Record<
   { label: string; bg: string; text: string; ring: string; icon: typeof CheckCircle2 }
 > = {
   compliant: {
-    label: 'COMPLIANT',
+    label: 'VERIFIED SCAN',
     bg: 'bg-success-50',
     text: 'text-success-700',
     ring: 'ring-success-200',
     icon: CheckCircle2,
   },
   'non-compliant': {
-    label: 'NON-COMPLIANT',
+    label: 'SCAN FAILED',
     bg: 'bg-danger-50',
     text: 'text-danger-700',
     ring: 'ring-danger-200',
@@ -246,7 +246,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
             <div>
               <p className={`text-2xl font-extrabold tracking-tight ${cfg.text}`}>{cfg.label}</p>
               <p className="text-sm text-ink-600 mt-0.5">
-                {detected} of {total} mandatory declarations detected
+                {detected} of {total} mandatory declarations verified
                 {scan.violations > 0 && ` • ${scan.violations} potential violation${scan.violations > 1 ? 's' : ''}`}.
               </p>
             </div>
@@ -255,7 +255,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
             <p className="font-semibold text-ink-800">Compliance Summary</p>
             <p className="max-w-xs mt-0.5">
               {scan.status === 'compliant'
-                ? 'All mandatory declarations were detected and within Legal Metrology norms.'
+                ? 'All mandatory declarations were verified and within Legal Metrology norms.'
                 : scan.status === 'non-compliant'
                 ? 'One or more mandatory declarations are missing or show discrepancies requiring officer verification.'
                 : 'Some declarations could not be read confidently and require manual review.'}
@@ -305,7 +305,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
                         d.detected ? 'bg-success-50 text-success-700' : 'bg-danger-50 text-danger-700'
                       }`}
                     >
-                      {d.detected ? 'Detected' : 'Not Detected'}
+                      {d.detected ? 'Verified' : 'Not Verified'}
                     </span>
                   </div>
                   {d.detected && (
@@ -336,7 +336,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
           />
           <div className="flex flex-wrap gap-2 mt-4">
             <span className="badge bg-brand-50 text-brand-700">
-              <span className="w-2 h-2 rounded-full bg-brand-500" /> Detected
+              <span className="w-2 h-2 rounded-full bg-brand-500" /> Verified
             </span>
             <span className="badge bg-danger-50 text-danger-700">
               <span className="w-2 h-2 rounded-full bg-danger-500" /> Missing

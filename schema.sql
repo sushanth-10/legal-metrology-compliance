@@ -1,5 +1,5 @@
 -- Reference schema for NIRIKSHA. The backend applies the same idempotent DDL
--- automatically at startup and seeds the two development accounts.
+-- automatically at startup and seeds three development accounts.
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     login_id TEXT NOT NULL UNIQUE,
@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS complaints (
     district TEXT,
     submitted_by TEXT,
     status TEXT NOT NULL DEFAULT 'NEW',
+    source TEXT NOT NULL DEFAULT 'USER_SUBMITTED',
     priority TEXT DEFAULT 'MEDIUM',
     admin_remark TEXT,
     evidence_images JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -106,3 +107,7 @@ CREATE TABLE IF NOT EXISTS complaint_status_history (
     administrative_remark TEXT,
     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS complaints_status_idx ON complaints(status);
+CREATE INDEX IF NOT EXISTS complaints_jurisdiction_created_idx ON complaints(state, district, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS complaints_auto_scan_unique_idx ON complaints(scan_id) WHERE source = 'AUTO_SCAN_VIOLATION' AND scan_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS complaint_history_complaint_id_idx ON complaint_status_history(complaint_id, changed_at DESC);

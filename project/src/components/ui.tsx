@@ -6,13 +6,13 @@ export function StatusBadge({ status }: { status: ComplianceStatus }) {
   if (status === 'compliant')
     return (
       <span className="badge bg-success-50 text-success-700">
-        <CheckCircle2 className="w-3.5 h-3.5" /> Compliant
+        <CheckCircle2 className="w-3.5 h-3.5" /> Verified Scan
       </span>
     );
   if (status === 'non-compliant')
     return (
       <span className="badge bg-danger-50 text-danger-700">
-        <XCircle className="w-3.5 h-3.5" /> Non-Compliant
+        <XCircle className="w-3.5 h-3.5" /> Scan Failed
       </span>
     );
   return (

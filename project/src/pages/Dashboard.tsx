@@ -22,7 +22,7 @@ export function Dashboard() {
   const stats = [
     { label: 'Total Scans', value: scans.length, icon: ScanLine, tint: 'bg-brand-50 text-brand-600' },
     { label: 'Compliant', value: scans.filter((scan) => scan.status === 'compliant').length, icon: CheckCircle2, tint: 'bg-success-50 text-success-600' },
-    { label: 'Violations Detected', value: scans.reduce((total, scan) => total + Math.max(0, scan.violations || 0), 0), icon: XCircle, tint: 'bg-danger-50 text-danger-600' },
+    { label: 'Violations Found', value: scans.reduce((total, scan) => total + Math.max(0, scan.violations || 0), 0), icon: XCircle, tint: 'bg-danger-50 text-danger-600' },
     { label: 'Needs Review', value: scans.filter((scan) => scan.status === 'needs-review').length, icon: AlertCircle, tint: 'bg-warning-50 text-warning-600' },
   ];
 

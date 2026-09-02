@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
-import { AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronUp, Circle, CircleAlert, Eye, FileImage, FileText, ImageIcon, Info, Loader2, Plus, RotateCcw, ScanLine, SearchCheck, ShieldCheck, Sparkles, Upload, X } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronUp, Circle, CircleAlert, FileImage, FileText, ImageIcon, Info, Loader2, Plus, RotateCcw, ScanLine, ShieldCheck, Sparkles, Upload, X } from 'lucide-react';
 import { InfoNote, PageHeader } from '@/components/ui';
 import { useApp } from '@/store';
 import { apiBaseUrl, apiFetch, apiJson } from '@/lib/api';
@@ -8,9 +8,8 @@ import type { GeneratedReport, Scan } from '@/types';
 type Mode = 'report' | 'advanced';
 type Stage = 'upload' | 'processing' | 'report' | 'advanced';
 type Status = 'COMPLIANT' | 'VIOLATION' | 'UNABLE_TO_VERIFY' | 'NOT_APPLICABLE' | 'OFFICER_REVIEW_REQUIRED';
-type Visibility = 'VISIBLE' | 'NOT_VISIBLE' | 'UNREADABLE' | 'NOT_ASSESSED';
 type ProcessingStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'unable_to_verify';
-type ImageItem = { id: string; name: string; url: string };
+type ImageItem = { id: string; name: string; url: string; file?: File };
 type CameraState = {
   open: boolean;
   slotIndex: number | null;
@@ -55,7 +54,8 @@ function style(status: Status) {
 }
 function Badge({ status }: { status: Status }) {
   const cfg = style(status); const Icon = cfg.icon;
-  return <span className={'badge ' + cfg.badge}><Icon className="w-3.5 h-3.5" />{status.replace(/_/g, ' ')}</span>;
+  const label = status === 'COMPLIANT' ? 'VERIFIED SCAN' : status === 'VIOLATION' ? 'SCAN FAILED' : status.replace(/_/g, ' ');
+  return <span className={'badge ' + cfg.badge}><Icon className="w-3.5 h-3.5" />{label}</span>;
 }
 
 function ImageSlot({ image, index, choose, camera, drop, remove }: { image: ImageItem | null; index: number; choose: () => void; camera: () => void; drop: (e: DragEvent<HTMLDivElement>) => void; remove: () => void }) {
@@ -96,7 +96,7 @@ function Report({ images, back, result }: { images: Array<ImageItem | null>; bac
   const violations = checks.filter((x) => x.status === 'VIOLATION').length;
   const review = checks.filter((x) => x.status === 'UNABLE_TO_VERIFY' || x.status === 'OFFICER_REVIEW_REQUIRED' || x.status === 'NOT_APPLICABLE').length;
   const overallStatus = result?.overall_status ?? 'UNABLE_TO_VERIFY';
-  const overallLabel = overallStatus === 'COMPLIANT' ? 'COMPLIANT' : overallStatus === 'VIOLATION' ? 'VIOLATION' : overallStatus === 'NOT_APPLICABLE' ? 'NOT APPLICABLE' : overallStatus === 'OFFICER_REVIEW_REQUIRED' ? 'OFFICER REVIEW REQUIRED' : 'REQUIRES REVIEW';
+  const overallLabel = overallStatus === 'COMPLIANT' ? 'VERIFIED SCAN' : overallStatus === 'VIOLATION' ? 'SCAN FAILED' : overallStatus === 'NOT_APPLICABLE' ? 'NOT APPLICABLE' : overallStatus === 'OFFICER_REVIEW_REQUIRED' ? 'OFFICER REVIEW REQUIRED' : 'REQUIRES REVIEW';
   return <div className="max-w-6xl mx-auto"><PageHeader title="Compliance report" subtitle={result ? 'Image analysis completed through the secure Gemini backend.' : 'No persisted scan result is available.'} actions={<button onClick={back} className="btn-secondary"><RotateCcw className="w-4 h-4" />Scan another product</button>} /><InfoNote>{result ? 'Gemini extracted package text and the Python compliance_engine applied the legal rules.' : 'Run a scan to view actual findings.'}</InfoNote><section className="card p-5 sm:p-6 mt-6"><div className="flex flex-col sm:flex-row sm:items-center gap-4"><div className="w-14 h-14 rounded-2xl bg-warning-50 text-warning-700 grid place-items-center"><AlertCircle className="w-7 h-7" /></div><div className="flex-1"><p className="text-xs uppercase tracking-wide font-semibold text-ink-500">Overall status</p><h2 className="text-2xl font-bold text-ink-900 mt-1">{overallLabel}</h2></div><div className="grid grid-cols-2 gap-3 sm:w-64"><div className="rounded-xl bg-danger-50 p-3"><p className="text-xl font-bold text-danger-700">{violations}</p><p className="text-xs text-danger-700 mt-1">Violation</p></div><div className="rounded-xl bg-warning-50 p-3"><p className="text-xl font-bold text-warning-700">{review}</p><p className="text-xs text-warning-700 mt-1">Need review</p></div></div></div></section><section className="mt-6"><div className="flex items-center justify-between mb-3"><h2 className="font-semibold text-ink-900">Individual checks</h2><span className="text-sm text-ink-500">{checks.length} findings</span></div><div className="space-y-3">{checks.map((check) => <CheckRow key={check.id} check={check} images={images} />)}</div></section></div>;
 }
 
@@ -122,7 +122,7 @@ function PersistedReportActions({ result }: { result: ScanApiResponse | null }) 
 }
 
 export function ScanProduct() {
-  const { addScan, addReport, role } = useApp();
+  const { addScan, addReport } = useApp();
   const [slots, setSlots] = useState<Array<ImageItem | null>>([null, null]);
   const [stage, setStage] = useState<Stage>('upload');
   const [mode, setMode] = useState<Mode>('report');
@@ -203,7 +203,7 @@ export function ScanProduct() {
   const storeFile = (file: File | undefined, index = target) => {
     if (!file || !file.type.startsWith('image/')) return;
     const reader = new FileReader();
-    reader.onload = () => setSlots((old) => old.map((item, i) => i === index ? { id: String(Date.now()) + '-' + i, name: file.name, url: reader.result as string } : item));
+    reader.onload = () => setSlots((old) => old.map((item, i) => i === index ? { id: String(Date.now()) + '-' + i, name: file.name, url: reader.result as string, file } : item));
     reader.readAsDataURL(file);
   };
   const input = (event: ChangeEvent<HTMLInputElement>) => { storeFile(event.target.files?.[0]); event.target.value = ''; };
@@ -265,9 +265,11 @@ export function ScanProduct() {
     try {
       const formData = new FormData();
       for (const item of selected) {
-        const response = await fetch(item.url);
-        const blob = await response.blob();
-        const file = new File([blob], item.name || `package-${Date.now()}.png`, { type: blob.type || 'image/png' });
+        const file = item.file || await (async () => {
+          const response = await fetch(item.url);
+          const blob = await response.blob();
+          return new File([blob], item.name || `package-${Date.now()}.png`, { type: blob.type || 'image/png' });
+        })();
         formData.append('images', file, file.name);
       }
 
@@ -293,16 +295,6 @@ export function ScanProduct() {
       if (payload.scan) {
         const normalizedScan = normalizeScan(payload.scan);
         addScan(normalizedScan);
-        if (normalizedScan.id && payload.report_id) {
-          try {
-            const savedReport = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(payload.report_id)}`);
-            if (savedReport?.id) {
-              addReport(savedReport);
-            }
-          } catch (reportError) {
-            console.warn('Persisted report was not available immediately after scan:', reportError);
-          }
-        }
       }
       setResult(payload);
       setStage(scanMode === 'advanced' ? 'advanced' : 'report');

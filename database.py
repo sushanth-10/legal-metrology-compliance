@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS complaints (
     district TEXT,
     submitted_by TEXT,
     status TEXT NOT NULL DEFAULT 'NEW',
+    source TEXT NOT NULL DEFAULT 'USER_SUBMITTED',
     priority TEXT DEFAULT 'MEDIUM',
     admin_remark TEXT,
     evidence_images JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -185,6 +186,8 @@ CREATE INDEX IF NOT EXISTS reports_generated_at_idx ON reports(generated_at DESC
 CREATE INDEX IF NOT EXISTS reports_organization_id_idx ON reports(organization_id);
 CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index);
 CREATE INDEX IF NOT EXISTS complaints_status_idx ON complaints(status);
+CREATE INDEX IF NOT EXISTS complaints_jurisdiction_created_idx ON complaints(state, district, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS complaints_auto_scan_unique_idx ON complaints(scan_id) WHERE source = 'AUTO_SCAN_VIOLATION' AND scan_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS complaint_history_complaint_id_idx ON complaint_status_history(complaint_id, changed_at DESC);
 """
 
@@ -328,6 +331,7 @@ def init_db() -> None:
                     district TEXT,
                     submitted_by TEXT,
                     status TEXT NOT NULL DEFAULT 'NEW',
+                    source TEXT NOT NULL DEFAULT 'USER_SUBMITTED',
                     priority TEXT DEFAULT 'MEDIUM',
                     admin_remark TEXT,
                     evidence_images JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -374,6 +378,7 @@ def init_db() -> None:
             _add_column_if_missing(cursor, 'complaints', 'state', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS state TEXT')
             _add_column_if_missing(cursor, 'complaints', 'district', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS district TEXT')
             _add_column_if_missing(cursor, 'complaints', 'admin_remark', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS admin_remark TEXT')
+            _add_column_if_missing(cursor, 'complaints', 'source', "ALTER TABLE complaints ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'USER_SUBMITTED'")
             _add_column_if_missing(cursor, 'complaints', 'updated_at', 'ALTER TABLE complaints ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
             _add_column_if_missing(cursor, 'complaint_status_history', 'administrative_remark', 'ALTER TABLE complaint_status_history ADD COLUMN IF NOT EXISTS administrative_remark TEXT')
             _add_column_if_missing(cursor, 'complaint_status_history', 'changed_at', 'ALTER TABLE complaint_status_history ADD COLUMN IF NOT EXISTS changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
@@ -387,6 +392,10 @@ def init_db() -> None:
                 cursor.execute("CREATE INDEX IF NOT EXISTS scan_images_scan_id_idx ON scan_images(scan_id, sort_index)")
             if _column_exists(cursor, 'complaints', 'status'):
                 cursor.execute("CREATE INDEX IF NOT EXISTS complaints_status_idx ON complaints(status)")
+            if _column_exists(cursor, 'complaints', 'state') and _column_exists(cursor, 'complaints', 'district'):
+                cursor.execute("CREATE INDEX IF NOT EXISTS complaints_jurisdiction_created_idx ON complaints(state, district, created_at DESC)")
+            if _column_exists(cursor, 'complaints', 'source') and _column_exists(cursor, 'complaints', 'scan_id'):
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS complaints_auto_scan_unique_idx ON complaints(scan_id) WHERE source = 'AUTO_SCAN_VIOLATION' AND scan_id IS NOT NULL")
             if _column_exists(cursor, 'complaint_status_history', 'complaint_id'):
                 cursor.execute("CREATE INDEX IF NOT EXISTS complaint_history_complaint_id_idx ON complaint_status_history(complaint_id, changed_at DESC)")
 
@@ -397,8 +406,47 @@ def init_db() -> None:
             if _column_exists(cursor, 'reports', 'generated_at'):
                 cursor.execute("CREATE INDEX IF NOT EXISTS reports_generated_at_idx ON reports(generated_at DESC)")
 
+            seed_demo_users(cursor)
+
         connection.commit()
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def seed_demo_users(cursor: psycopg.Cursor[Any]) -> None:
+    demo_password = "Niriksha@123"
+    demo_users = [
+        ("demo-organization", "demo.organization@niriksha.in", "Demo Organization", "organization", "demo.organization@niriksha.in", None),
+        ("demo-officer", "OFFICER001", "Demo Officer", "officer", "demo.officer@niriksha.in", "OFFICER001"),
+        ("demo-admin", "ADMIN001", "Demo Administrator", "admin", "demo.admin@niriksha.in", None),
+    ]
+    for user_id, login_id, name, role, email, officer_id in demo_users:
+        cursor.execute(
+            """
+            INSERT INTO users (id, login_id, name, password_hash, role, email, location, state, district, officer_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (login_id) DO NOTHING
+            """,
+            (user_id, login_id, name, _password_hash(demo_password), role, email, "Bengaluru", "Karnataka", "Bengaluru", officer_id),
+        )
+
+    cursor.execute(
+        """
+        INSERT INTO organizations (id, organization_name, organization_type, official_email, password_hash, registered_address, state, district)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        ("demo-organization-record", "Demo Organization", "Private Company", "demo.organization@niriksha.in", _password_hash(demo_password), "Bengaluru", "Karnataka", "Bengaluru"),
+    )
+    cursor.execute("UPDATE users SET organization_id = %s WHERE id = %s AND organization_id IS NULL", ("demo-organization-record", "demo-organization"))
+
+    cursor.execute(
+        """
+        INSERT INTO admins (id, admin_name, official_email, department, state, district, administrative_role)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        ("demo-admin", "Demo Administrator", "demo.admin@niriksha.in", "Legal Metrology", "Karnataka", "Bengaluru", "District Admin"),
+    )
 
 
 def create_user(login_id: str, password: str, name: str, role: str, email: str | None = None, *, state: str | None = None, district: str | None = None, organization_name: str | None = None, organization_type: str | None = None, official_mobile: str | None = None, registered_address: str | None = None, pin_code: str | None = None, gstin: str | None = None, registration_number: str | None = None, authorized_representative_name: str | None = None, authorized_representative_designation: str | None = None, authorized_representative_contact: str | None = None, website: str | None = None, industry: str | None = None) -> dict[str, Any]:
@@ -448,7 +496,7 @@ def user_from_token(token: str) -> dict[str, Any] | None:
             return None
         with connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT * FROM users WHERE id = %s", (payload["sub"],))
+                cursor.execute("SELECT u.*, COALESCE(NULLIF(u.state, ''), a.state) AS state, COALESCE(NULLIF(u.district, ''), a.district) AS district FROM users u LEFT JOIN admins a ON a.id = u.id WHERE u.id = %s", (payload["sub"],))
                 return cursor.fetchone()
     except (ValueError, KeyError, TypeError, json.JSONDecodeError, RuntimeError, psycopg.Error):
         return None

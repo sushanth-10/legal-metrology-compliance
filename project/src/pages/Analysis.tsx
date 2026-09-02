@@ -3,7 +3,7 @@ import { CheckCircle2, Loader2, ScanLine } from 'lucide-react';
 
 const steps = [
   'Image uploaded',
-  'Text detected',
+  'Label text extracted',
   'Product information extracted',
   'Mandatory declarations checked',
   'Compliance rules analyzed',

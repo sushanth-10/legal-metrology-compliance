@@ -16,8 +16,7 @@ The application combines OCR, AI extraction, rule-based validation, document gen
 ## Core Features
 
 - Product image upload and scan intake
-- OCR-based extraction using Google Cloud Vision
-- AI interpretation using Google Gemini
+- Multimodal image extraction using Google Gemini
 - Rule-based compliance evaluation through the Python compliance engine
 - Organization, officer, and admin authentication flows
 - Complaint registration and admin-driven status management
@@ -42,9 +41,8 @@ The application combines OCR, AI extraction, rule-based validation, document gen
 - PostgreSQL access through psycopg
 - Token-based authentication and secure session handling
 
-### AI and OCR
-- Google Cloud Vision OCR
-- Google Gemini AI
+### AI Analysis
+- Google Gemini multimodal analysis
 - Python compliance engine for validation logic
 
 ### Database and Storage
@@ -109,7 +107,7 @@ The application is structured around three main operational roles:
    py -3 -m pip install -r requirements.txt
    ```
 
-2. Configure environment variables in `.env` with your database, Gemini, and Supabase values.
+2. Configure environment variables in `.env` with your database, Gemini, and Supabase values. If the primary Gemini project reaches quota, set `GEMINI_API_KEY_FALLBACK` (or comma-separated `GEMINI_API_KEYS`) to a key from another quota-managed Google project; optionally set `GEMINI_FALLBACK_MODEL` for that credential.
 
 3. Initialize the database schema:
 
@@ -130,6 +128,18 @@ The application is structured around three main operational roles:
    npm install
    npm run dev
    ```
+
+### Development Demo Accounts
+
+The database initializer creates these accounts when they do not already exist:
+
+| Role | Login ID / Email | Password |
+| --- | --- | --- |
+| Organization | `demo.organization@niriksha.in` | `Niriksha@123` |
+| Officer | `OFFICER001` | `Niriksha@123` |
+| Admin | `ADMIN001` | `Niriksha@123` |
+
+The officer email is `demo.officer@niriksha.in`, and the admin email is `demo.admin@niriksha.in`.
 
 ## Notes
 

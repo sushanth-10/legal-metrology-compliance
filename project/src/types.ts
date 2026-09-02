@@ -110,7 +110,7 @@ export interface Scan {
   complianceScore?: number;
 }
 
-export type ComplaintStatus = 'new' | 'review' | 'investigating' | 'resolved' | 'closed';
+export type ComplaintStatus = 'new' | 'viewed' | 'in-progress' | 'review' | 'investigating' | 'action-taken' | 'resolved' | 'closed';
 
 export interface ComplaintStatusEvent {
   id: string;

@@ -84,7 +84,8 @@ const activeRoles = new Set<Role>(['organization', 'officer', 'admin']);
 function normalizeComplaint(complaint: Complaint): Complaint {
   const images = (complaint.evidenceImages || []).map((value) => value && value.startsWith('/') ? `${apiBaseUrl()}${value}` : value);
   const image = complaint.image?.startsWith('/') ? `${apiBaseUrl()}${complaint.image}` : complaint.image;
-  const status = complaint.status === ('under_review' as Complaint['status']) ? 'review' : complaint.status;
+  const statusMap: Record<string, Complaint['status']> = { under_review: 'in-progress', review: 'in-progress', investigating: 'in-progress', in_progress: 'in-progress' };
+  const status = statusMap[complaint.status] || complaint.status;
   return { ...complaint, status, image: image || images[0] || '', evidenceImages: images.length ? images : image ? [image] : [] };
 }
 
@@ -108,14 +109,17 @@ interface AppState {
   scans: Scan[];
   scansLoading: boolean;
   addScan: (s: Scan) => void;
+  refreshScans: (filters?: { search?: string; status?: string; date?: string }) => Promise<void>;
   reports: GeneratedReport[];
+  reportsLoading: boolean;
   addReport: (report: GeneratedReport) => void;
+  refreshReports: () => Promise<void>;
   complaints: Complaint[];
   complaintsLoading: boolean;
   refreshComplaints: (filters?: ComplaintFilters) => Promise<void>;
   loadComplaint: (id: string) => Promise<Complaint>;
   addComplaint: (c: Partial<Complaint> & { scanId?: string; evidenceImages?: string[] }) => Promise<boolean>;
-  updateComplaintStatus: (id: string, status: Complaint['status'], adminRemark?: string) => Promise<void>;
+  updateComplaintStatus: (id: string, status: Complaint['status'], adminRemark?: string, jurisdiction?: { state?: string; district?: string }) => Promise<void>;
   selectedScanId: string | null;
   setSelectedScanId: (id: string | null) => void;
   mobileNavOpen: boolean;
@@ -137,6 +141,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [scans, setScans] = useState<Scan[]>([]);
   const [scansLoading, setScansLoading] = useState(false);
   const [reports, setReports] = useState<GeneratedReport[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [complaintsLoading, setComplaintsLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<User>(emptyUser);
@@ -180,30 +185,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     let mounted = true;
     setScansLoading(true);
-    setComplaintsLoading(true);
     const loadPersistentData = async () => {
       try {
         const persistedScans = await apiJson<Scan[]>('/api/scans');
         if (mounted) setScans(persistedScans.map(normalizeScan));
-        const persistedComplaints = await apiJson<Complaint[]>('/api/complaints');
-        if (mounted) setComplaints(persistedComplaints.map(normalizeComplaint));
-        if (role === 'organization' || role === 'officer' || role === 'admin') {
-          const persistedReports = await apiJson<GeneratedReport[]>('/api/reports');
-          if (mounted) setReports(persistedReports);
-        } else if (mounted) {
-          setReports([]);
-        }
       } catch (error) {
         console.error(error);
         if (mounted) console.error('Persistent NIRIKSHA data is unavailable:', error);
       } finally {
         if (mounted) setScansLoading(false);
-        if (mounted) setComplaintsLoading(false);
       }
     };
     void loadPersistentData();
     return () => { mounted = false; };
-  }, [isAuthenticated, role]);
+  }, [isAuthenticated]);
 
   const user: User = currentUser || emptyUser;
 
@@ -279,6 +274,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [navigate, showToast]);
 
   const addScan = useCallback((s: Scan) => setScans((prev) => [normalizeScan(s), ...prev.filter((item) => item.id !== s.id)]), []);
+  const refreshScans = useCallback(async (filters: { search?: string; status?: string; date?: string } = {}) => {
+    setScansLoading(true);
+    try {
+      const query = new URLSearchParams({ limit: '50' });
+      Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, value); });
+      const result = await apiJson<Scan[]>(`/api/scans?${query.toString()}`);
+      setScans(result.map(normalizeScan));
+    } finally {
+      setScansLoading(false);
+    }
+  }, []);
   const addReport = useCallback((report: GeneratedReport) => {
     setReports((prev) => {
       const next = [report, ...prev.filter((item) => item.scanId !== report.scanId)];
@@ -295,6 +301,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setComplaints(result.map(normalizeComplaint));
     } finally {
       setComplaintsLoading(false);
+    }
+  }, []);
+
+  const refreshReports = useCallback(async () => {
+    setReportsLoading(true);
+    try {
+      const result = await apiJson<GeneratedReport[]>('/api/reports?limit=50');
+      setReports(result);
+    } finally {
+      setReportsLoading(false);
     }
   }, []);
 
@@ -318,18 +334,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [showToast]);
 
-  const updateComplaintStatus = useCallback(async (id: string, status: Complaint['status'], adminRemark?: string) => {
-    const backendStatus = status === 'review' ? 'UNDER_REVIEW' : status.toUpperCase();
+  const updateComplaintStatus = useCallback(async (id: string, status: Complaint['status'], adminRemark?: string, jurisdiction?: { state?: string; district?: string }) => {
+    const backendStatus = status === 'review' || status === 'in-progress' ? 'IN_PROGRESS' : status === 'action-taken' ? 'ACTION_TAKEN' : status.toUpperCase().replace('-', '_');
     try {
       const updated = await apiJson<{ id: string; status: string; updatedBy: string; remark?: string | null }>(`/api/complaints/${encodeURIComponent(id)}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: backendStatus, admin_remark: adminRemark }),
+        body: JSON.stringify({ status: backendStatus, admin_remark: adminRemark, state: jurisdiction?.state, district: jurisdiction?.district }),
       });
       setComplaints((prev) => prev.map((c) => (c.id === id ? { ...c, status: (updated.status || status).toLowerCase() as Complaint['status'], adminRemark: updated.remark } : c)));
     } catch (error) {
       console.error(error);
       showToast('error', error instanceof Error ? error.message : 'Complaint status could not be updated.');
+      throw error;
     }
   }, [showToast]);
 
@@ -349,8 +366,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         scans,
         scansLoading,
         addScan,
+        refreshScans,
         reports,
+        reportsLoading,
         addReport,
+        refreshReports,
         complaints,
         complaintsLoading,
         refreshComplaints,

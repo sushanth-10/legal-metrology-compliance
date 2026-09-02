@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Search, Filter, ArrowLeft, Calendar, Tag, AlertTriangle } from 'lucide-react';
 import { useApp } from '@/store';
 import { PageHeader, StatusBadge, EmptyState } from '@/components/ui';
@@ -7,17 +7,25 @@ import type { ComplianceStatus } from '@/types';
 
 const statusOptions: { value: ComplianceStatus | 'all'; label: string }[] = [
   { value: 'all', label: 'All Status' },
-  { value: 'compliant', label: 'Compliant' },
-  { value: 'non-compliant', label: 'Non-Compliant' },
+  { value: 'compliant', label: 'Verified Scan' },
+  { value: 'non-compliant', label: 'Scan Failed' },
   { value: 'needs-review', label: 'Needs Review' },
 ];
 
 export function ScanHistory() {
-  const { scans, scansLoading, selectedScanId, setSelectedScanId } = useApp();
+  const { scans, scansLoading, refreshScans, selectedScanId, setSelectedScanId } = useApp();
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<ComplianceStatus | 'all'>('all');
   const [date, setDate] = useState('');
   const [showFilters, setShowFilters] = useState(false);
+
+  useEffect(() => {
+    if (!query && status === 'all' && !date) return;
+    const timer = window.setTimeout(() => {
+      void refreshScans({ search: query.trim(), status: status === 'all' ? '' : status, date: date.trim() });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query, status, date, refreshScans]);
 
   const selected = scans.find((s) => s.id === selectedScanId);
 

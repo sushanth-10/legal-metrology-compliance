@@ -1,18 +1,32 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Download, Eye, FileText, X } from 'lucide-react';
 import { useApp } from '@/store';
+import { apiJson } from '@/lib/api';
 import { PageHeader, StatusBadge } from '@/components/ui';
 import { downloadReportAsPdf } from '@/lib/reporting';
 import type { GeneratedReport } from '@/types';
 
 export function Reports() {
-  const { reports, setPage, showToast } = useApp();
+  const { reports, reportsLoading, refreshReports, setPage, showToast } = useApp();
   const [previewReport, setPreviewReport] = useState<GeneratedReport | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  useEffect(() => { void refreshReports().catch((error) => showToast('error', error instanceof Error ? error.message : 'Reports could not be loaded.')); }, [refreshReports, showToast]);
   const download = async (report: GeneratedReport) => {
     try {
       await downloadReportAsPdf(report);
     } catch (error) {
       showToast('error', error instanceof Error ? error.message : 'The PDF could not be downloaded.');
+    }
+  };
+  const preview = async (report: GeneratedReport) => {
+    setPreviewLoading(true);
+    try {
+      const detail = report.checks.length ? report : await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(report.id)}`);
+      setPreviewReport(detail);
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'The report could not be loaded.');
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -28,7 +42,9 @@ export function Reports() {
         }
       />
 
-      {reports.length === 0 ? (
+      {reportsLoading && reports.length === 0 ? (
+        <div className="card p-8 text-center text-ink-500">Loading reports from the database…</div>
+      ) : reports.length === 0 ? (
         <div className="card p-8 text-center">
           <FileText className="w-10 h-10 text-ink-300 mx-auto" />
           <h3 className="font-semibold text-ink-900 mt-4">No generated reports yet</h3>
@@ -63,7 +79,7 @@ export function Reports() {
                     <td className="table-td"><StatusBadge status={report.overallStatus} /></td>
                     <td className="table-td text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => setPreviewReport(report)} className="btn-secondary px-3 py-1.5 text-xs">
+                        <button onClick={() => void preview(report)} disabled={previewLoading} className="btn-secondary px-3 py-1.5 text-xs">
                           <Eye className="w-3.5 h-3.5" /> View Report
                         </button>
                         <button onClick={() => void download(report)} className="btn-secondary px-3 py-1.5 text-xs">
