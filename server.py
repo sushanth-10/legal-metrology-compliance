@@ -44,7 +44,10 @@ from pdf_reports import create_pdf
 app = FastAPI(title="NIRIKSHA Package Compliance API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,8 +58,8 @@ logger = logging.getLogger("niriksha")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash").strip()
 ORGANIZATION_OTP_REQUIRED = (os.getenv("ORGANIZATION_OTP_REQUIRED", "false").strip().lower() in {"1", "true", "yes", "on"})
 ORGANIZATION_OTP_VERIFY_URL = (os.getenv("ORGANIZATION_OTP_VERIFY_URL") or "").strip()
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
@@ -67,9 +70,9 @@ MAX_UPLOAD_BYTES = max(1, int(os.getenv("MAX_UPLOAD_BYTES", "10485760")))
 ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 GEMINI_MAX_IMAGE_DIMENSION = 3000
 GEMINI_MAX_IMAGE_BYTES = 8 * 1024 * 1024
-GEMINI_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "15")))
-GEMINI_FALLBACK_TIMEOUT_SECONDS = max(GEMINI_REQUEST_TIMEOUT_SECONDS, float(os.getenv("GEMINI_FALLBACK_TIMEOUT_SECONDS", "20")))
-GEMINI_TOTAL_TIMEOUT_SECONDS = max(GEMINI_FALLBACK_TIMEOUT_SECONDS, float(os.getenv("GEMINI_TOTAL_TIMEOUT_SECONDS", "25")))
+GEMINI_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "60")))
+GEMINI_FALLBACK_TIMEOUT_SECONDS = max(GEMINI_REQUEST_TIMEOUT_SECONDS, float(os.getenv("GEMINI_FALLBACK_TIMEOUT_SECONDS", "60")))
+GEMINI_TOTAL_TIMEOUT_SECONDS = max(GEMINI_FALLBACK_TIMEOUT_SECONDS, float(os.getenv("GEMINI_TOTAL_TIMEOUT_SECONDS", "120")))
 _SUPABASE_BUCKET_READY = False
 _SUPABASE_BUCKET_LOCK = Lock()
 
@@ -1118,10 +1121,14 @@ def _configured_gemini_credentials() -> list[tuple[str, str]]:
         return []
     primary_model = GEMINI_MODEL.strip()
     fallback_model = GEMINI_FALLBACK_MODEL
+    configured_keys = [key.strip() for key in (os.getenv("GEMINI_API_KEYS") or "").split(",") if key.strip()]
+    fallback_key = (os.getenv("GEMINI_API_KEY_FALLBACK") or "").strip()
     credentials = [(primary_key, primary_model)]
-    if fallback_model and fallback_model != primary_model:
-        fallback_key = (os.getenv("GEMINI_API_KEY_FALLBACK") or "").strip() or primary_key
-        credentials.append((fallback_key, fallback_model))
+    for key in [fallback_key, *configured_keys]:
+        if key and key not in {item[0] for item in credentials}:
+            credentials.append((key, fallback_model or primary_model))
+    if fallback_model and fallback_model != primary_model and len(credentials) == 1:
+        credentials.append((primary_key, fallback_model))
     return credentials
 
 
@@ -1139,7 +1146,8 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
     response = None
     last_error: Exception | None = None
     total_started = time.perf_counter()
-    for credential_index, (api_key, model) in enumerate(credentials[:2]):
+    attempts = credentials[:2]
+    for credential_index, (api_key, model) in enumerate(attempts):
         label = "Fallback" if credential_index > 0 else "Primary"
         remaining_seconds = GEMINI_TOTAL_TIMEOUT_SECONDS - (time.perf_counter() - total_started)
         if remaining_seconds <= 0:
@@ -1160,7 +1168,6 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
                     temperature=0,
                     max_output_tokens=4096,
                     response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 )
             response = await asyncio.wait_for(
@@ -1202,7 +1209,7 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
                     ),
                 ) from error
             if is_quota_error:
-                if credential_index + 1 < len(credentials):
+                if credential_index + 1 < len(attempts):
                     logger.warning("[GEMINI] %s failed after %.2fs", label, elapsed)
                     logger.info("[GEMINI] Switching to fallback model: %s", credentials[credential_index + 1][1])
                     continue
@@ -1216,7 +1223,7 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
                 ) from error
             if _is_gemini_transient_error(error):
                 logger.warning("[GEMINI] %s failed/timeout after %.2fs", label, elapsed)
-                if credential_index + 1 < len(credentials):
+                if credential_index + 1 < len(attempts):
                     logger.info("[GEMINI] Switching to fallback model: %s", credentials[credential_index + 1][1])
                     continue
                 break
@@ -1580,7 +1587,7 @@ async def get_complaint(complaint_id: str, authorization: str | None = Header(de
 @app.post("/api/scan")
 async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile] = File(...), authorization: str | None = Header(default=None)) -> dict[str, Any]:
     total_started = time.perf_counter()
-    logger.info("[PERF] Request received")
+    logger.info("[SCAN] Request received: %d image(s)", len(images))
     user = _user_or_401(authorization)
     if len(images) < 2:
         raise HTTPException(status_code=400, detail="At least 2 images are required for a scan.")
@@ -1598,9 +1605,16 @@ async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile
             raise HTTPException(status_code=400, detail=f"The uploaded file {upload.filename} is empty.")
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail=f"The uploaded file {upload.filename} exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB size limit.")
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.verify()
+        except Exception as error:
+            logger.warning("[SCAN] Invalid image %s: type=%s size=%d error=%s", upload.filename, upload.content_type, len(data), type(error).__name__)
+            raise HTTPException(status_code=400, detail=f"The uploaded file {upload.filename} is not a valid readable image.") from error
+        logger.info("[SCAN] Image accepted: type=%s size=%d filename=%s", upload.content_type, len(data), upload.filename)
         loaded.append((upload.filename, upload.content_type, data))
 
-    logger.info("[PERF] Image upload/read: %.2fs", time.perf_counter() - total_started)
+    logger.info("[SCAN] Received %d valid image(s) in %.2fs", len(loaded), time.perf_counter() - total_started)
     image_started = time.perf_counter()
     gemini_images = _prepare_images_for_gemini(loaded)
     logger.info("[PERF] Image processing: %.2fs", time.perf_counter() - image_started)
@@ -1909,4 +1923,4 @@ async def download_report(report_id: str, authorization: str | None = Header(def
 
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server:app", host="127.0.0.1", port=int(os.getenv("API_PORT", "8001")), reload=True)

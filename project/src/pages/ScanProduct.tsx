@@ -26,6 +26,9 @@ type ScanApiResponse = {
   report_id?: string | null;
 };
 
+const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const maxImageBytes = 10 * 1024 * 1024;
+
 function normalizeScan(scan: Scan): Scan {
   const normalizeImageList = (values?: string[]) =>
     values
@@ -122,7 +125,7 @@ function PersistedReportActions({ result }: { result: ScanApiResponse | null }) 
 }
 
 export function ScanProduct() {
-  const { addScan, addReport } = useApp();
+  const { addScan } = useApp();
   const [slots, setSlots] = useState<Array<ImageItem | null>>([null, null]);
   const [stage, setStage] = useState<Stage>('upload');
   const [mode, setMode] = useState<Mode>('report');
@@ -201,7 +204,20 @@ export function ScanProduct() {
   }, [cameraState.stream]);
 
   const storeFile = (file: File | undefined, index = target) => {
-    if (!file || !file.type.startsWith('image/')) return;
+    if (!file) return;
+    if (!allowedImageTypes.has(file.type)) {
+      setUploadError('Please upload a JPG, PNG, or WebP image.');
+      return;
+    }
+    if (file.size === 0) {
+      setUploadError(`${file.name || 'The selected image'} is empty.`);
+      return;
+    }
+    if (file.size > maxImageBytes) {
+      setUploadError(`${file.name || 'The selected image'} exceeds the 10 MB size limit.`);
+      return;
+    }
+    setUploadError(null);
     const reader = new FileReader();
     reader.onload = () => setSlots((old) => old.map((item, i) => i === index ? { id: String(Date.now()) + '-' + i, name: file.name, url: reader.result as string, file } : item));
     reader.readAsDataURL(file);
@@ -264,12 +280,24 @@ export function ScanProduct() {
 
     try {
       const formData = new FormData();
+      const files: File[] = [];
+      const fingerprints = new Set<string>();
       for (const item of selected) {
-        const file = item.file || await (async () => {
-          const response = await fetch(item.url);
-          const blob = await response.blob();
-          return new File([blob], item.name || `package-${Date.now()}.png`, { type: blob.type || 'image/png' });
-        })();
+        if (!item.file) {
+          throw new Error(`Please reselect ${item.name || 'the image'} before generating the report.`);
+        }
+        const file = item.file;
+        const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+        const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+        if (!fingerprints.has(fingerprint)) {
+          fingerprints.add(fingerprint);
+          files.push(file);
+        }
+      }
+      if (files.length < 2) {
+        throw new Error('Please upload at least two different package images.');
+      }
+      for (const file of files) {
         formData.append('images', file, file.name);
       }
 
@@ -284,7 +312,7 @@ export function ScanProduct() {
       if (!request.ok) {
         const detail = payload && typeof payload === 'object' && 'detail' in payload ? String((payload as { detail?: unknown }).detail ?? '') : '';
         const message = detail || 'The backend could not process the uploaded package images.';
-        throw new Error(message);
+        throw new Error(request.status >= 500 ? `Gemini/backend analysis failed: ${message}` : message);
       }
 
       if (!payload || !Array.isArray(payload.checks) || !payload.overall_status) {
@@ -304,7 +332,7 @@ export function ScanProduct() {
       setStage('upload');
       const errMessage = error instanceof Error ? error.message : 'Unable to connect to the secure backend.';
       const friendlyMessage = errMessage === 'Failed to fetch' || errMessage.includes('fetch')
-        ? 'Unable to connect to the backend. Start the Python API on the configured API port and ensure GEMINI_API_KEY is set in the project .env file.'
+        ? 'Unable to connect to the backend. Start the Python API on the configured API port and check the backend environment configuration.'
         : errMessage;
       setUploadError(friendlyMessage);
     } finally {
