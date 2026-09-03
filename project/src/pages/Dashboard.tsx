@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/store';
 import { StatusBadge } from '@/components/ui';
+import { Logo } from '@/components/Logo';
 
 export function Dashboard() {
   const { user, role, scans, scansLoading, setPage, setSelectedScanId } = useApp();
@@ -67,6 +68,9 @@ export function Dashboard() {
             <AlertCircle className="w-3.5 h-3.5" />
             Use a clear image of the product label for better analysis.
           </p>
+        </div>
+        <div className="relative mt-6 w-44 rounded-xl bg-white p-3 shadow-lg ring-1 ring-white/30 sm:absolute sm:right-8 sm:top-1/2 sm:mt-0 sm:-translate-y-1/2">
+          <Logo className="h-auto w-full" />
         </div>
       </div>
 

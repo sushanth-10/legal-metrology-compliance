@@ -159,7 +159,7 @@ export function BrandPanel({
       <div className="absolute -right-12 -top-12 w-64 h-64 rounded-full bg-white/5" />
       <div className="absolute -left-16 bottom-10 w-48 h-48 rounded-full bg-white/5" />
       <div className="relative">
-        <Logo className="h-16 w-auto" />
+        <Logo className="h-40 w-auto" />
         <div className="mt-16 max-w-sm">
           <h2 className="text-3xl font-bold leading-tight">{title}</h2>
           <p className="text-brand-100 mt-3">{subtitle}</p>

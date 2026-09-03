@@ -13,6 +13,12 @@ const roleOptions: Array<{ key: LoginMode; label: string; icon: typeof ShieldChe
   { key: 'admin', label: 'Admin', icon: KeyRound },
 ];
 
+const demoAccounts: Array<{ role: string; loginLabel: string; login: string; password: string }> = [
+  { role: 'Organization', loginLabel: 'Email', login: 'demo.organization@niriksha.in', password: 'Niriksha@123' },
+  { role: 'Officer', loginLabel: 'ID', login: 'OFFICER001', password: 'Niriksha@123' },
+  { role: 'Admin', loginLabel: 'ID', login: 'ADMIN001', password: 'Niriksha@123' },
+];
+
 export function Login({ mode = 'organization' }: { mode?: LoginMode }) {
   const { authenticate, navigate, showToast } = useApp();
   const [role, setRole] = useState<LoginMode>(mode);
@@ -61,6 +67,18 @@ export function Login({ mode = 'organization' }: { mode?: LoginMode }) {
         <div className="flex items-center justify-between text-sm"><label className="flex items-center gap-2 cursor-pointer text-ink-600"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="rounded border-ink-300 text-brand-600 focus:ring-brand-500" />Remember me</label><button type="button" className="text-brand-600 font-medium hover:text-brand-700">Forgot Password?</button></div>
         <button type="submit" disabled={submitting} className="btn-primary w-full py-3"><LogIn className="w-4 h-4" />{submitting ? 'Signing in…' : 'Sign In'}</button>
       </form>
+      <section className="mt-7 rounded-xl border border-brand-100 bg-brand-50/60 p-4" aria-labelledby="demo-login-title">
+        <h2 id="demo-login-title" className="text-sm font-semibold text-brand-900">Demo Login</h2>
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          {demoAccounts.map((account) => (
+            <div key={account.role} className="rounded-lg border border-brand-100 bg-white px-3 py-2.5">
+              <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">{account.role}</p>
+              <p className="mt-1 text-xs text-ink-600">{account.loginLabel}: <span className="font-medium text-ink-800 break-all">{account.login}</span></p>
+              <p className="text-xs text-ink-600">Password: <span className="font-medium text-ink-800">{account.password}</span></p>
+            </div>
+          ))}
+        </div>
+      </section>
       {activeRole !== 'admin' && <p className="text-center text-sm text-ink-500 mt-6">Need an account? <button onClick={() => navigate(activeRole === 'organization' ? 'signup-organization' : 'signup-officer')} className="text-brand-600 font-semibold hover:text-brand-700">Register as {activeRole === 'organization' ? 'Organization' : 'Officer'}</button></p>}
       {activeRole === 'organization' && <button onClick={() => navigate('admin-login')} className="btn-ghost text-ink-500 text-sm mt-3 w-full justify-center">Admin sign in</button>}
       {activeRole === 'admin' && <button onClick={() => navigate('login')} className="btn-ghost text-ink-500 text-sm mt-3 w-full justify-center">Organization / Officer sign in</button>}

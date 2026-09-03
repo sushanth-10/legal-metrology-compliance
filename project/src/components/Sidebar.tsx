@@ -62,10 +62,10 @@ export function Sidebar() {
           mobileNavOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
-        <div className="px-5 pt-5 pb-4 flex items-center justify-between">
-          <Logo className="h-14 w-auto max-w-[190px]" />
+        <div className="relative px-5 pt-5 pb-4 flex items-center justify-center">
+          <Logo className="h-32 w-auto max-w-[210px]" />
           <button
-            className="lg:hidden text-ink-500 hover:text-ink-800 p-1"
+            className="absolute right-5 lg:hidden text-ink-500 hover:text-ink-800 p-1"
             onClick={() => setMobileNavOpen(false)}
             aria-label={t('closeMenu')}
           >
