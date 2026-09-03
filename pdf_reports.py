@@ -26,6 +26,7 @@ GREEN = colors.HexColor("#16803c")
 RED = colors.HexColor("#c62828")
 AMBER = colors.HexColor("#b36b00")
 DEFAULT_STYLE = ParagraphStyle("DefaultValue", fontName="Helvetica", fontSize=8.2, leading=10.2, textColor=TEXT)
+LOGO_PATH = Path(__file__).resolve().parent / "project" / "assets" / "niriksha-logo.jpeg"
 
 
 def _raw(value: Any, fallback: str = "Not available") -> str:
@@ -79,9 +80,9 @@ def _normalized_status(value: Any) -> str:
 def _status_label(value: Any) -> str:
     normalized = _normalized_status(value)
     if normalized == "VIOLATION":
-        return "VIOLATION / NON-COMPLIANT"
+        return "NON-COMPLIANT"
     if normalized in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED"}:
-        return "UNABLE TO VERIFY / REQUIRES REVIEW"
+        return "UNABLE TO VERIFY"
     if normalized == "COMPLIANT":
         return "COMPLIANT"
     return normalized.replace("_", " ")
@@ -239,9 +240,11 @@ def create_pdf(report: dict[str, Any], output_path: Path) -> None:
     fields = extracted.get("fields") if isinstance(extracted, dict) else {}
     fields = fields if isinstance(fields, dict) else {}
     images = report.get("images") or []
+    officer_review = report.get("officer_review") or {}
 
-    brand_block = Table([[Paragraph("N", brand)]], colWidths=[15 * mm], rowHeights=[15 * mm], style=TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), BLUE), ("BOX", (0, 0), (-1, -1), 0.5, BLUE), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    logo = _scaled_image(LOGO_PATH.read_bytes(), 18 * mm, 18 * mm) if LOGO_PATH.is_file() and LOGO_PATH.stat().st_size else None
+    brand_block = Table([[logo]], colWidths=[20 * mm], rowHeights=[20 * mm], style=TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, LINE), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
     heading_block = [Paragraph("NIRIKSHA", ParagraphStyle("BrandWord", parent=title, fontSize=13, alignment=TA_LEFT)), Paragraph("AI-POWERED PRODUCT COMPLIANCE", ParagraphStyle("BrandSub", parent=small, textColor=BLUE, fontName="Helvetica-Bold", alignment=TA_LEFT))]
     title_block = [Paragraph("LEGAL METROLOGY COMPLIANCE INSPECTION REPORT", title), Paragraph("Automated inspection record for officer review", subtitle)]
@@ -268,7 +271,7 @@ def create_pdf(report: dict[str, Any], output_path: Path) -> None:
     detail_rows = [
         [_paragraph("Product Name", label), _paragraph(report.get("product_name", report.get("productName"))), _paragraph("Manufacturer / Packer", label), _paragraph(manufacturer)],
         [_paragraph("Net Quantity", label), _paragraph(_field_value(fields, "net_quantity")), _paragraph("MRP", label), _paragraph(_field_value(fields, "mrp"))],
-        [_paragraph("Inspection Officer / User", label), _paragraph(report.get("officer_name", "Not available")), _paragraph("Location", label), _paragraph(report.get("location", "Not provided"))],
+        [_paragraph("Inspection Officer / User", label), _paragraph(officer_review.get("officer_name") or report.get("officer_name", "Not available")), _paragraph("Location", label), _paragraph(officer_review.get("inspection_location") or report.get("location", "Not provided"))],
         [_paragraph("Number of Evidence Images", label), _paragraph(len(images)), _paragraph("Remarks", label), _paragraph(remarks)],
     ]
     story.extend([_bordered_table(detail_rows, [34 * mm, 56 * mm, 34 * mm, 56 * mm]), Spacer(1, 7)])
@@ -355,10 +358,10 @@ def create_pdf(report: dict[str, Any], output_path: Path) -> None:
 
     story.append(_section("7. OFFICER REVIEW", section_text, content_width))
     officer_rows = [
-        [_paragraph("Officer Name", label), _paragraph("____________________________", line_style), _paragraph("Designation", label), _paragraph("____________________", line_style)],
-        [_paragraph("Department / Office", label), _paragraph("____________________________", line_style), _paragraph("Date", label), _paragraph("__________________", line_style)],
-        [_paragraph("Review Status", label), _paragraph("[ ] Verified    [ ] Requires Further Verification\n[ ] Non-Compliant Confirmed    [ ] No Violation Found", line_style), _paragraph("Officer Signature", label), _paragraph("________________________________", line_style)],
-        [_paragraph("Inspection Remarks", label), _paragraph("______________________________\n______________________________", line_style), _paragraph("Recommended Action", label), _paragraph("__________________________\n__________________________", line_style)],
+        [_paragraph("Officer Name", label), _paragraph(officer_review.get("officer_name") or report.get("officer_name"), line_style), _paragraph("Designation", label), _paragraph(officer_review.get("designation"), line_style)],
+        [_paragraph("Department / Office", label), _paragraph(officer_review.get("department"), line_style), _paragraph("Date", label), _paragraph(officer_review.get("inspection_date") or report.get("scanned_at"), line_style)],
+        [_paragraph("Review Status", label), _paragraph(officer_review.get("review_status"), line_style), _paragraph("Inspection Location", label), _paragraph(officer_review.get("inspection_location") or report.get("location"), line_style)],
+        [_paragraph("Inspection Remarks", label), _paragraph(officer_review.get("inspection_remarks"), line_style), _paragraph("Recommended Action", label), _paragraph(officer_review.get("recommended_action"), line_style)],
     ]
     story.extend([_bordered_table(officer_rows, [31 * mm, 59 * mm, 34 * mm, 56 * mm]), Spacer(1, 7)])
 

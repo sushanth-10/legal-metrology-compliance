@@ -9,9 +9,9 @@ import {
   User as UserIcon,
   Settings,
   LogOut,
-  ShieldCheck,
   X,
 } from 'lucide-react';
+import { Logo } from '@/components/Logo';
 import type { PageKey } from '@/types';
 import type { TranslationKey } from '@/lib/i18n';
 import { useApp } from '@/store';
@@ -63,19 +63,7 @@ export function Sidebar() {
         }`}
       >
         <div className="px-5 pt-5 pb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-xl bg-brand-600 flex items-center justify-center shadow-sm">
-              <ShieldCheck className="w-5.5 h-5.5 text-white" strokeWidth={2.2} />
-            </div>
-            <div>
-              <p className="font-display font-extrabold text-ink-900 text-lg leading-none tracking-tight">
-                NIRIKSHA
-              </p>
-              <p className="text-[11px] text-ink-500 mt-1 leading-none">
-                AI-Powered Product Compliance
-              </p>
-            </div>
-          </div>
+          <Logo className="h-14 w-auto max-w-[190px]" />
           <button
             className="lg:hidden text-ink-500 hover:text-ink-800 p-1"
             onClick={() => setMobileNavOpen(false)}

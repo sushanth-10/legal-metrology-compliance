@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   XCircle,
@@ -18,28 +18,28 @@ import { useApp } from '@/store';
 import { Confidence } from '@/components/ui';
 import { downloadReportAsPdf } from '@/lib/reporting';
 import { apiJson } from '@/lib/api';
-import type { ComplianceStatus, Declaration, BoundingBox, GeneratedReport } from '@/types';
+import type { ComplianceStatus, Declaration, BoundingBox, GeneratedReport, OfficerReview, OfficerReviewStatus } from '@/types';
 
 const statusConfig: Record<
   ComplianceStatus,
   { label: string; bg: string; text: string; ring: string; icon: typeof CheckCircle2 }
 > = {
   compliant: {
-    label: 'VERIFIED SCAN',
+    label: 'COMPLIANT',
     bg: 'bg-success-50',
     text: 'text-success-700',
     ring: 'ring-success-200',
     icon: CheckCircle2,
   },
   'non-compliant': {
-    label: 'SCAN FAILED',
+    label: 'NON-COMPLIANT',
     bg: 'bg-danger-50',
     text: 'text-danger-700',
     ring: 'ring-danger-200',
     icon: XCircle,
   },
   'needs-review': {
-    label: 'NEEDS REVIEW',
+    label: 'UNABLE TO VERIFY',
     bg: 'bg-warning-50',
     text: 'text-warning-700',
     ring: 'ring-warning-200',
@@ -174,12 +174,26 @@ function EvidenceImage({
 }
 
 export function Result({ onScanAnother }: { onScanAnother: () => void }) {
-  const { scans, selectedScanId, setPage, role, addReport, reports, showToast } = useApp();
+  const { scans, selectedScanId, setPage, role, user, addReport, reports, showToast } = useApp();
   const scan = scans.find((s) => s.id === selectedScanId) ?? scans[0];
   const [showMrp, setShowMrp] = useState(true);
   const [previewReport, setPreviewReport] = useState<GeneratedReport | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const [review, setReview] = useState<OfficerReview>(() => ({
+    officer_name: user.name || '', designation: user.designation || 'Officer', department: user.department || '',
+    inspection_location: user.location || '', inspection_date: new Date().toISOString().slice(0, 16),
+    inspection_remarks: '', recommended_action: '', review_status: 'Requires Further Verification',
+  }));
+  const [reviewSaving, setReviewSaving] = useState(false);
+  const [reviewSaved, setReviewSaved] = useState(false);
+
+  useEffect(() => {
+    if (scan?.officerReview) {
+      setReview((current) => ({ ...current, ...scan.officerReview }));
+      setReviewSaved(true);
+    }
+  }, [scan?.id, scan?.officerReview]);
 
   if (!scan) return null;
 
@@ -194,7 +208,7 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
   const handleGeneratePdfReport = async () => {
     if (role !== 'officer') return;
     try {
-      const report = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(scan.id)}`, { method: 'POST' });
+      const report = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(scan.id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(review) });
       addReport(report);
       setPreviewReport(report);
       setReportError(null);
@@ -203,6 +217,22 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
       console.error(error);
       setReportError(error instanceof Error ? error.message : 'Unable to generate the PDF report from the current scan result.');
     }
+  };
+
+  const saveReview = async () => {
+    if (role !== 'officer') return;
+    if (!review.officer_name.trim() || !review.designation.trim() || !review.department.trim() || !review.inspection_location.trim() || !review.inspection_date) {
+      showToast('error', 'Complete the officer identity, department, location, and inspection date before saving.');
+      return;
+    }
+    setReviewSaving(true);
+    try {
+      await apiJson(`/api/scans/${encodeURIComponent(scan.id)}/review`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(review) });
+      setReviewSaved(true);
+      showToast('success', 'Officer review saved.');
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Officer review could not be saved.');
+    } finally { setReviewSaving(false); }
   };
 
   return (
@@ -457,6 +487,8 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
           {reportError}
         </div>
       )}
+
+      {role === 'officer' && <section className="card p-5 sm:p-6"><div><h3 className="font-semibold text-ink-900">Officer Review</h3><p className="text-sm text-ink-500 mt-1">The AI result is a preliminary assessment. Review and confirm it before generating the final report.</p></div><div className="grid sm:grid-cols-2 gap-4 mt-5"><label className="text-sm text-ink-600">Officer Name<input className="input mt-1" value={review.officer_name} onChange={(e) => setReview({ ...review, officer_name: e.target.value })} /></label><label className="text-sm text-ink-600">Designation<input className="input mt-1" value={review.designation} onChange={(e) => setReview({ ...review, designation: e.target.value })} /></label><label className="text-sm text-ink-600">Department / Office<input className="input mt-1" value={review.department} onChange={(e) => setReview({ ...review, department: e.target.value })} /></label><label className="text-sm text-ink-600">Inspection Location<input className="input mt-1" value={review.inspection_location} onChange={(e) => setReview({ ...review, inspection_location: e.target.value })} /></label><label className="text-sm text-ink-600">Inspection Date<input type="datetime-local" className="input mt-1" value={review.inspection_date} onChange={(e) => setReview({ ...review, inspection_date: e.target.value })} /></label><label className="text-sm text-ink-600">Review Status<select className="input mt-1" value={review.review_status} onChange={(e) => setReview({ ...review, review_status: e.target.value as OfficerReviewStatus })}><option>Verified</option><option>Requires Further Verification</option><option>Non-Compliant Confirmed</option><option>No Violation Found</option></select></label><label className="text-sm text-ink-600 sm:col-span-2">Inspection Remarks<textarea className="input mt-1 min-h-24" value={review.inspection_remarks} onChange={(e) => setReview({ ...review, inspection_remarks: e.target.value })} /></label><label className="text-sm text-ink-600 sm:col-span-2">Recommended Action<textarea className="input mt-1 min-h-24" value={review.recommended_action} onChange={(e) => setReview({ ...review, recommended_action: e.target.value })} /></label></div><div className="flex items-center justify-end gap-3 mt-4"><span className="text-sm text-success-700">{reviewSaved ? 'Review saved' : ''}</span><button className="btn-primary" onClick={() => void saveReview()} disabled={reviewSaving}>{reviewSaving ? 'Saving…' : 'Save inspection review'}</button></div></section>}
 
       {/* Actions */}
       <div className="flex flex-col sm:flex-row gap-3 pb-4">

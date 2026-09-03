@@ -16,6 +16,18 @@ export type PageKey =
 export type View = AuthRoute | PageKey;
 
 export type ComplianceStatus = 'compliant' | 'non-compliant' | 'needs-review';
+export type OfficerReviewStatus = 'Verified' | 'Requires Further Verification' | 'Non-Compliant Confirmed' | 'No Violation Found';
+
+export interface OfficerReview {
+  officer_name: string;
+  designation: string;
+  department: string;
+  inspection_location: string;
+  inspection_date: string;
+  inspection_remarks: string;
+  recommended_action: string;
+  review_status: OfficerReviewStatus;
+}
 
 export type ReportStatus = 'compliant' | 'non-compliant' | 'needs-review';
 
@@ -27,6 +39,7 @@ export interface ReportCheck {
   requirement: string;
   explanation: string;
   evidence: string;
+  confidence?: number | null;
 }
 
 export interface GeneratedReport {
@@ -52,6 +65,11 @@ export interface GeneratedReport {
   officerName?: string;
   pdfUrl?: string;
   extractedData?: Record<string, unknown>;
+  designation?: string;
+  department?: string;
+  inspectionRemarks?: string;
+  recommendedAction?: string;
+  reviewStatus?: string;
 }
 
 export type DeclarationKey =
@@ -108,6 +126,7 @@ export interface Scan {
   extractedData?: Record<string, unknown>;
   checks?: Array<{ id: string | number; label: string; status: string; value: string; reference: string; explanation: string; evidence?: string; confidence?: number | null }>;
   complianceScore?: number;
+  officerReview?: Partial<OfficerReview>;
 }
 
 export type ComplaintStatus = 'new' | 'viewed' | 'in-progress' | 'review' | 'investigating' | 'action-taken' | 'resolved' | 'closed';
@@ -198,6 +217,8 @@ export interface User {
   state?: string;
   district?: string;
   joined: string;
+  designation?: string;
+  department?: string;
 }
 
 export interface AuthSession {

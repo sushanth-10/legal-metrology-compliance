@@ -187,8 +187,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setScansLoading(true);
     const loadPersistentData = async () => {
       try {
-        const persistedScans = await apiJson<Scan[]>('/api/scans');
-        if (mounted) setScans(persistedScans.map(normalizeScan));
+        const [persistedScans, persistedProfile] = await Promise.all([
+          apiJson<Scan[]>('/api/scans'),
+          apiJson<User>('/api/profile'),
+        ]);
+        if (mounted) {
+          setScans(persistedScans.map(normalizeScan));
+          setCurrentUser(persistedProfile);
+          saveSession({ ...session, name: persistedProfile.name, user: persistedProfile });
+        }
       } catch (error) {
         console.error(error);
         if (mounted) console.error('Persistent NIRIKSHA data is unavailable:', error);
@@ -226,12 +233,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const authenticate = useCallback(async (loginId: string, password: string, requestedRole: Role, otp?: string) => {
     try {
-      const response = await apiJson<{ token: string; user: { id: string; loginId: string; name: string; role: Role; email: string; location: string; officerId?: string; organizationId?: string; state?: string; district?: string } }>('/api/auth/login', {
+      const response = await apiJson<{ token: string; user: { id: string; loginId: string; name: string; role: Role; email: string; location: string; officerId?: string; organizationId?: string; state?: string; district?: string; designation?: string; department?: string } }>('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ login_id: loginId, password, role: requestedRole, otp }),
       });
-      const profile: User = { name: response.user.name, role: response.user.role, email: response.user.email, location: response.user.location, officerId: response.user.officerId, organizationId: response.user.organizationId, state: response.user.state, district: response.user.district, joined: 'Account' };
+      const profile: User = { name: response.user.name, role: response.user.role, email: response.user.email, location: response.user.location, officerId: response.user.officerId, organizationId: response.user.organizationId, state: response.user.state, district: response.user.district, designation: response.user.designation, department: response.user.department, joined: 'Account' };
       setAuthed(true);
       setRole(response.user.role);
       setCurrentUser(profile);

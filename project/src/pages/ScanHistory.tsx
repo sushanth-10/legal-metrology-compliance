@@ -7,9 +7,9 @@ import type { ComplianceStatus } from '@/types';
 
 const statusOptions: { value: ComplianceStatus | 'all'; label: string }[] = [
   { value: 'all', label: 'All Status' },
-  { value: 'compliant', label: 'Verified Scan' },
-  { value: 'non-compliant', label: 'Scan Failed' },
-  { value: 'needs-review', label: 'Needs Review' },
+  { value: 'compliant', label: 'COMPLIANT' },
+  { value: 'non-compliant', label: 'NON-COMPLIANT' },
+  { value: 'needs-review', label: 'UNABLE TO VERIFY' },
 ];
 
 export function ScanHistory() {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ShieldCheck, CheckCircle2, XCircle, Info, X } from 'lucide-react';
+import { CheckCircle2, XCircle, Info, X } from 'lucide-react';
 import { useApp } from '@/store';
+import { Logo } from '@/components/Logo';
 
 export function ToastHost() {
   const { toasts, dismissToast } = useApp();
@@ -96,15 +97,7 @@ export function AuthFooter() {
       <div className="max-w-6xl mx-auto px-6 py-8">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center">
-              <ShieldCheck className="w-4 h-4 text-white" />
-            </div>
-            <div>
-              <p className="font-display font-bold text-ink-900 text-sm leading-none">NIRIKSHA</p>
-              <p className="text-[11px] text-ink-500 mt-0.5 leading-none">
-                AI-Powered Product Compliance
-              </p>
-            </div>
+            <Logo className="h-10 w-auto" />
           </div>
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-ink-500">
             <a href="#" className="hover:text-brand-600">Privacy Policy</a>
@@ -166,15 +159,7 @@ export function BrandPanel({
       <div className="absolute -right-12 -top-12 w-64 h-64 rounded-full bg-white/5" />
       <div className="absolute -left-16 bottom-10 w-48 h-48 rounded-full bg-white/5" />
       <div className="relative">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-xl bg-white/15 flex items-center justify-center backdrop-blur">
-            <ShieldCheck className="w-6 h-6 text-white" strokeWidth={2.2} />
-          </div>
-          <div>
-            <p className="font-display font-extrabold text-2xl tracking-tight">NIRIKSHA</p>
-            <p className="text-brand-100 text-sm mt-0.5">AI-Powered Product Compliance</p>
-          </div>
-        </div>
+        <Logo className="h-16 w-auto" />
         <div className="mt-16 max-w-sm">
           <h2 className="text-3xl font-bold leading-tight">{title}</h2>
           <p className="text-brand-100 mt-3">{subtitle}</p>

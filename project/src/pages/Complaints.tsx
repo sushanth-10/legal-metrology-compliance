@@ -4,7 +4,7 @@ import { useApp } from '@/store';
 import { EmptyState, PageHeader } from '@/components/ui';
 import type { Complaint } from '@/types';
 
-const labels: Record<string, string> = { new: 'New', viewed: 'Viewed', 'in-progress': 'In Progress', review: 'In Progress', investigating: 'In Progress', 'action-taken': 'Action Taken', resolved: 'Resolved', closed: 'Closed' };
+const labels: Record<string, string> = { new: 'New', viewed: 'Viewed', 'in-progress': 'In Progress', 'action-taken': 'Action Taken', resolved: 'Resolved', closed: 'Closed' };
 const classes: Record<string, string> = { new: 'bg-brand-50 text-brand-700', viewed: 'bg-warning-50 text-warning-700', 'in-progress': 'bg-warning-50 text-warning-700', review: 'bg-warning-50 text-warning-700', investigating: 'bg-purple-50 text-purple-700', 'action-taken': 'bg-purple-50 text-purple-700', resolved: 'bg-success-50 text-success-700', closed: 'bg-ink-100 text-ink-700' };
 function formatDate(value?: string) { return value ? new Date(value).toLocaleString() : '—'; }
 

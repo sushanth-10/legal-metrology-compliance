@@ -496,7 +496,7 @@ def user_from_token(token: str) -> dict[str, Any] | None:
             return None
         with connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT u.*, COALESCE(NULLIF(u.state, ''), a.state) AS state, COALESCE(NULLIF(u.district, ''), a.district) AS district FROM users u LEFT JOIN admins a ON a.id = u.id WHERE u.id = %s", (payload["sub"],))
+                cursor.execute("SELECT u.*, a.department, a.administrative_role, COALESCE(NULLIF(u.state, ''), a.state) AS state, COALESCE(NULLIF(u.district, ''), a.district) AS district FROM users u LEFT JOIN admins a ON a.id = u.id WHERE u.id = %s", (payload["sub"],))
                 return cursor.fetchone()
     except (ValueError, KeyError, TypeError, json.JSONDecodeError, RuntimeError, psycopg.Error):
         return None

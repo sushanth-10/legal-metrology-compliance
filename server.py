@@ -312,6 +312,24 @@ class RegisterRequest(BaseModel):
     industry: str | None = None
 
 
+class ProfileUpdateRequest(BaseModel):
+    name: str
+    location: str
+    state: str | None = None
+    district: str | None = None
+
+
+class InspectionReviewRequest(BaseModel):
+    officer_name: str
+    designation: str
+    department: str
+    inspection_location: str
+    inspection_date: str
+    inspection_remarks: str = ""
+    recommended_action: str = ""
+    review_status: str
+
+
 ACTIVE_ROLES = {"organization", "officer", "admin"}
 
 
@@ -321,6 +339,8 @@ def _user_payload(user: dict[str, Any]) -> dict[str, Any]:
         "email": user.get("email") or "", "location": user.get("location") or "",
         "officerId": user.get("officer_id"), "organizationId": user.get("organization_id"), "orgId": user.get("organization_id"),
         "state": user.get("state"), "district": user.get("district"),
+        "designation": user.get("designation") or user.get("administrative_role") or ("Officer" if user.get("role") == "officer" else user.get("role", "").title()),
+        "department": user.get("department") or "",
     }
 
 
@@ -677,6 +697,7 @@ def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]], cursor: Any =
         "extractedData": extracted,
         "checks": results,
         "complianceScore": int(score),
+        "officerReview": _scan_review(scan),
     }
 
 
@@ -744,6 +765,48 @@ def _report_summary(checks: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _scan_review(scan: dict[str, Any]) -> dict[str, Any]:
+    metadata = scan.get("image_metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+    review = metadata.get("officer_review") if isinstance(metadata, dict) else None
+    return review if isinstance(review, dict) else {}
+
+
+def _review_payload(request: InspectionReviewRequest) -> dict[str, str]:
+    values = request.model_dump()
+    return {key: str(value or "").strip() for key, value in values.items()}
+
+
+def _save_scan_review(scan_id: str, user: dict[str, Any], review: dict[str, str]) -> dict[str, Any]:
+    allowed_statuses = {"Verified", "Requires Further Verification", "Non-Compliant Confirmed", "No Violation Found"}
+    if review.get("review_status") not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Choose a valid officer review status.")
+    required = ("officer_name", "designation", "department", "inspection_location", "inspection_date")
+    if any(not review.get(field) for field in required):
+        raise HTTPException(status_code=400, detail="Officer name, designation, department, location, and inspection date are required.")
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT s.image_metadata FROM scans s WHERE s.scan_id = %s AND s.user_id = %s", (scan_id, user["id"]))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Scan not found.")
+            metadata = row.get("image_metadata") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            metadata["officer_review"] = review
+            cursor.execute("UPDATE scans SET image_metadata = %s::jsonb WHERE scan_id = %s", (json.dumps(metadata), scan_id))
+        connection.commit()
+    return review
+
+
 def _build_pdf_report(
     report_id: str,
     scan: dict[str, Any],
@@ -752,6 +815,7 @@ def _build_pdf_report(
     officer_name: str,
     location: str | None,
     images: list[dict[str, Any]],
+    review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble one report payload from persisted scan data for all PDF callers."""
     status = scan.get("overall_status")
@@ -779,6 +843,7 @@ def _build_pdf_report(
         "summary": _report_summary(checks),
         "compliance_score": int(score),
         "images": images,
+        "officer_review": review or {},
     }
 
 
@@ -790,6 +855,7 @@ def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: di
         score = metadata.get("compliance_score")
     if score is None:
         score = _calculate_compliance_score(checks)
+    metadata_review = (metadata.get("officer_review") if isinstance(metadata, dict) else None) or {}
     return {
         "id": row["report_id"], "report_id": row["report_id"], "scanId": row["scan_id"], "scan_id": row["scan_id"],
         "productName": row.get("product_name") or "Product name unavailable", "generatedAt": iso_datetime(row["generated_at"]),
@@ -801,6 +867,11 @@ def _report_dto(row: dict[str, Any], checks: list[dict[str, Any]], extracted: di
             "value": item["value"], "requirement": item["reference"], "explanation": item["explanation"], "evidence": item["evidence"], "confidence": item.get("confidence"),
         } for item in checks], "pdfUrl": f"/api/reports/{row['report_id']}/pdf", "extractedData": extracted,
         "complianceScore": int(score), "location": row.get("inspection_location") or "Not provided",
+        "designation": metadata_review.get("designation") or "Not provided",
+        "department": metadata_review.get("department") or "Not provided",
+        "inspectionRemarks": metadata_review.get("inspection_remarks") or "",
+        "recommendedAction": metadata_review.get("recommended_action") or "",
+        "reviewStatus": metadata_review.get("review_status") or "",
     }
 
 
@@ -1367,7 +1438,7 @@ async def login(request: LoginRequest) -> dict[str, Any]:
                         (request.login_id.strip(), request.login_id.strip(), requested_role),
                     )
                 else:
-                    cursor.execute("SELECT u.*, COALESCE(NULLIF(u.state, ''), a.state) AS state, COALESCE(NULLIF(u.district, ''), a.district) AS district FROM users u LEFT JOIN admins a ON a.id = u.id WHERE LOWER(u.login_id) = LOWER(%s)", (request.login_id.strip(),))
+                    cursor.execute("SELECT u.*, a.department, a.administrative_role, COALESCE(NULLIF(u.state, ''), a.state) AS state, COALESCE(NULLIF(u.district, ''), a.district) AS district FROM users u LEFT JOIN admins a ON a.id = u.id WHERE LOWER(u.login_id) = LOWER(%s)", (request.login_id.strip(),))
                 user = cursor.fetchone()
     except Exception:
         raise HTTPException(status_code=503, detail="The authentication service is unavailable. Check the PostgreSQL connection.")
@@ -1385,6 +1456,33 @@ async def login(request: LoginRequest) -> dict[str, Any]:
         "user": _user_payload(user),
         "otpRequired": ORGANIZATION_OTP_REQUIRED,
     }
+
+
+@app.get("/api/profile")
+async def get_profile(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    return _user_payload(_user_or_401(authorization))
+
+
+@app.patch("/api/profile")
+async def update_profile(request: ProfileUpdateRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _user_or_401(authorization)
+    values = {key: str(value or "").strip() for key, value in request.model_dump().items()}
+    if not values["name"] or not values["location"]:
+        raise HTTPException(status_code=400, detail="Name and location are required.")
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("UPDATE users SET name = %s, location = %s, state = %s, district = %s WHERE id = %s RETURNING *", (values["name"], values["location"], values["state"] or None, values["district"] or None, user["id"]))
+                updated = cursor.fetchone()
+            connection.commit()
+        if not updated:
+            raise HTTPException(status_code=404, detail="Profile not found.")
+        updated.update({"department": user.get("department"), "administrative_role": user.get("administrative_role")})
+        return _user_payload(updated)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="The profile could not be saved.")
 
 
 @app.post("/api/auth/register")
@@ -1756,6 +1854,18 @@ async def get_scan(scan_id: str, authorization: str | None = Header(default=None
     return scan
 
 
+@app.patch("/api/scans/{scan_id}/review")
+async def save_scan_review(scan_id: str, request: InspectionReviewRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _officer_or_403(authorization)
+    try:
+        review = _save_scan_review(scan_id, user, _review_payload(request))
+        return {"scan_id": scan_id, "officerReview": review}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="The officer review could not be saved.")
+
+
 def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | None:
     with connect() as connection:
         with connection.cursor() as cursor:
@@ -1796,7 +1906,7 @@ def _report_record(report_id: str, user: dict[str, Any]) -> dict[str, Any] | Non
 
 
 @app.post("/api/reports/{scan_id}")
-async def generate_report(scan_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+async def generate_report(scan_id: str, request: InspectionReviewRequest | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     user = _report_user_or_403(authorization)
     try:
         if not _get_scan(scan_id, user):
@@ -1807,6 +1917,10 @@ async def generate_report(scan_id: str, authorization: str | None = Header(defau
                 scan = cursor.fetchone()
                 if not scan:
                     raise HTTPException(status_code=404, detail="Scan not found.")
+                review = _review_payload(request) if request else _scan_review(scan)
+                if request:
+                    scan["image_metadata"] = {**(scan.get("image_metadata") or {}), "officer_review": review}
+                    cursor.execute("UPDATE scans SET image_metadata = %s::jsonb WHERE scan_id = %s", (json.dumps(scan["image_metadata"]), scan_id))
                 checks = _result_rows(cursor, scan_id)
                 report_id = new_id("report")
                 generated_at = datetime.now(UTC)
@@ -1819,9 +1933,10 @@ async def generate_report(scan_id: str, authorization: str | None = Header(defau
                     user["name"],
                     scan.get("inspection_location"),
                     _report_image_sources(scan_id, cursor),
+                    review,
                 )
                 create_pdf(pdf_report, pdf_path)
-                cursor.execute("INSERT INTO reports (report_id, scan_id, generated_by, organization_id, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)", (report_id, scan_id, user["id"], scan.get("organization_id"), generated_at, str(pdf_path), scan["overall_status"], json.dumps({"compliance_score": scan.get("compliance_score", 0), "generator": "reportlab"})))
+                cursor.execute("INSERT INTO reports (report_id, scan_id, generated_by, organization_id, generated_at, pdf_path, status, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)", (report_id, scan_id, user["id"], scan.get("organization_id"), generated_at, str(pdf_path), scan["overall_status"], json.dumps({"compliance_score": scan.get("compliance_score", 0), "generator": "reportlab", "officer_review": review})))
             connection.commit()
         created = _report_record(report_id, user)
         if not created:

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Mail,
   MapPin,
@@ -12,9 +13,14 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/store';
 import { PageHeader } from '@/components/ui';
+import { apiJson } from '@/lib/api';
+import type { User } from '@/types';
 
 export function Profile() {
-  const { user, role, scans } = useApp();
+  const { user, role, scans, showToast } = useApp();
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ name: user.name, location: user.location, state: user.state || '', district: user.district || '' });
   const compliant = scans.filter((s) => s.status === 'compliant').length;
   const violations = scans.filter((s) => s.status === 'non-compliant').length;
   const review = scans.filter((s) => s.status === 'needs-review').length;
@@ -32,7 +38,7 @@ export function Profile() {
                 {user.name.split(' ').map((w) => w[0]).join('').slice(0, 2)}
               </div>
             </div>
-            <button className="btn-secondary mb-1">
+            <button className="btn-secondary mb-1" onClick={() => { setForm({ name: user.name, location: user.location, state: user.state || '', district: user.district || '' }); setEditing(true); }}>
               <Edit3 className="w-4 h-4" /> Edit
             </button>
           </div>
@@ -66,6 +72,10 @@ export function Profile() {
           </div>
         </div>
       </div>
+
+      {editing && <div className="card p-5 mb-6"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold text-ink-900">Edit profile</h3><button className="btn-ghost" onClick={() => setEditing(false)}>Cancel</button></div><div className="grid sm:grid-cols-2 gap-4 mt-4"><label className="text-sm text-ink-600">Name<input className="input mt-1" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label className="text-sm text-ink-600">Default inspection location<input className="input mt-1" value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} /></label><label className="text-sm text-ink-600">State<input className="input mt-1" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} /></label><label className="text-sm text-ink-600">District<input className="input mt-1" value={form.district} onChange={(e) => setForm({ ...form, district: e.target.value })} /></label></div><div className="flex justify-end mt-4"><button className="btn-primary" disabled={saving} onClick={async () => { if (!form.name.trim() || !form.location.trim()) { showToast('error', 'Name and location are required.'); return; } setSaving(true); try { const updated = await apiJson<User>('/api/profile', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) }); Object.assign(user, updated); setEditing(false); showToast('success', 'Profile updated successfully.'); window.location.reload(); } catch (error) { showToast('error', error instanceof Error ? error.message : 'Profile could not be saved.'); } finally { setSaving(false); } }}>{saving ? 'Saving…' : 'Save profile'}</button></div></div>}
+
+      <div className="card p-5 mb-6"><h3 className="font-semibold text-ink-900">Inspection identity</h3><div className="grid sm:grid-cols-2 gap-4 mt-4 text-sm"><div><p className="text-ink-500">Designation</p><p className="font-medium mt-1">{user.designation || 'Not provided'}</p></div><div><p className="text-ink-500">Department / Office</p><p className="font-medium mt-1">{user.department || 'Not provided'}</p></div></div></div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="card p-5">

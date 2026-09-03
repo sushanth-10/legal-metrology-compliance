@@ -57,7 +57,7 @@ function style(status: Status) {
 }
 function Badge({ status }: { status: Status }) {
   const cfg = style(status); const Icon = cfg.icon;
-  const label = status === 'COMPLIANT' ? 'VERIFIED SCAN' : status === 'VIOLATION' ? 'SCAN FAILED' : status.replace(/_/g, ' ');
+  const label = status === 'COMPLIANT' ? 'COMPLIANT' : status === 'VIOLATION' ? 'NON-COMPLIANT' : status === 'NOT_APPLICABLE' ? 'UNABLE TO VERIFY' : 'UNABLE TO VERIFY';
   return <span className={'badge ' + cfg.badge}><Icon className="w-3.5 h-3.5" />{label}</span>;
 }
 
@@ -99,7 +99,7 @@ function Report({ images, back, result }: { images: Array<ImageItem | null>; bac
   const violations = checks.filter((x) => x.status === 'VIOLATION').length;
   const review = checks.filter((x) => x.status === 'UNABLE_TO_VERIFY' || x.status === 'OFFICER_REVIEW_REQUIRED' || x.status === 'NOT_APPLICABLE').length;
   const overallStatus = result?.overall_status ?? 'UNABLE_TO_VERIFY';
-  const overallLabel = overallStatus === 'COMPLIANT' ? 'VERIFIED SCAN' : overallStatus === 'VIOLATION' ? 'SCAN FAILED' : overallStatus === 'NOT_APPLICABLE' ? 'NOT APPLICABLE' : overallStatus === 'OFFICER_REVIEW_REQUIRED' ? 'OFFICER REVIEW REQUIRED' : 'REQUIRES REVIEW';
+  const overallLabel = overallStatus === 'COMPLIANT' ? 'COMPLIANT' : overallStatus === 'VIOLATION' ? 'NON-COMPLIANT' : 'UNABLE TO VERIFY';
   return <div className="max-w-6xl mx-auto"><PageHeader title="Compliance report" subtitle={result ? 'Image analysis completed through the secure Gemini backend.' : 'No persisted scan result is available.'} actions={<button onClick={back} className="btn-secondary"><RotateCcw className="w-4 h-4" />Scan another product</button>} /><InfoNote>{result ? 'Gemini extracted package text and the Python compliance_engine applied the legal rules.' : 'Run a scan to view actual findings.'}</InfoNote><section className="card p-5 sm:p-6 mt-6"><div className="flex flex-col sm:flex-row sm:items-center gap-4"><div className="w-14 h-14 rounded-2xl bg-warning-50 text-warning-700 grid place-items-center"><AlertCircle className="w-7 h-7" /></div><div className="flex-1"><p className="text-xs uppercase tracking-wide font-semibold text-ink-500">Overall status</p><h2 className="text-2xl font-bold text-ink-900 mt-1">{overallLabel}</h2></div><div className="grid grid-cols-2 gap-3 sm:w-64"><div className="rounded-xl bg-danger-50 p-3"><p className="text-xl font-bold text-danger-700">{violations}</p><p className="text-xs text-danger-700 mt-1">Violation</p></div><div className="rounded-xl bg-warning-50 p-3"><p className="text-xl font-bold text-warning-700">{review}</p><p className="text-xs text-warning-700 mt-1">Need review</p></div></div></div></section><section className="mt-6"><div className="flex items-center justify-between mb-3"><h2 className="font-semibold text-ink-900">Individual checks</h2><span className="text-sm text-ink-500">{checks.length} findings</span></div><div className="space-y-3">{checks.map((check) => <CheckRow key={check.id} check={check} images={images} />)}</div></section></div>;
 }
 

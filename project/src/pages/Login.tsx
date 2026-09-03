@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { ShieldCheck, ScanLine, FileCheck, MapPin, BadgeCheck, LogIn, KeyRound } from 'lucide-react';
 import { useApp } from '@/store';
 import { AuthShell, BrandPanel, Breadcrumbs, PasswordField, Captcha } from '@/components/Auth';
+import { Logo } from '@/components/Logo';
 import type { Role } from '@/types';
 
 type LoginMode = 'organization' | 'officer' | 'admin';
@@ -14,7 +15,6 @@ const roleOptions: Array<{ key: LoginMode; label: string; icon: typeof ShieldChe
 
 export function Login({ mode = 'organization' }: { mode?: LoginMode }) {
   const { authenticate, navigate, showToast } = useApp();
-  const fixedRole = mode === 'admin' ? 'admin' : null;
   const [role, setRole] = useState<LoginMode>(mode);
   const [id, setId] = useState('');
   const [password, setPassword] = useState('');
@@ -23,7 +23,7 @@ export function Login({ mode = 'organization' }: { mode?: LoginMode }) {
   const [captchaOk, setCaptchaOk] = useState(false);
   const [errors, setErrors] = useState<{ id?: string | null; password?: string | null }>({});
   const [submitting, setSubmitting] = useState(false);
-  const activeRole = fixedRole ?? role;
+  const activeRole = role;
 
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
@@ -48,9 +48,9 @@ export function Login({ mode = 'organization' }: { mode?: LoginMode }) {
 
   return (
     <AuthShell brandSide={<BrandPanel title="Verify packaged commodity compliance with confidence." subtitle="NIRIKSHA connects organizations and Legal Metrology teams through secure, evidence-based compliance workflows." features={[{ icon: <ScanLine className="w-4 h-4 text-white" />, text: 'AI-powered label scanning & compliance checks' }, { icon: <FileCheck className="w-4 h-4 text-white" />, text: 'Persistent compliance findings and reports' }, { icon: <MapPin className="w-4 h-4 text-white" />, text: 'Jurisdiction-aware administrative oversight' }]} />}>
-      <div className="lg:hidden flex items-center gap-2.5 mb-6"><div className="w-10 h-10 rounded-xl bg-brand-600 flex items-center justify-center"><ShieldCheck className="w-5 h-5 text-white" /></div><div><p className="font-display font-extrabold text-ink-900 text-lg leading-none">NIRIKSHA</p><p className="text-[11px] text-ink-500 mt-1 leading-none">AI-Powered Product Compliance</p></div></div>
+      <div className="lg:hidden mb-6"><Logo className="h-14 w-auto" /></div>
       <Breadcrumbs items={[{ label: 'Home' }, { label: title, active: true }]} />
-      {!fixedRole && <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-ink-100 mb-6">{roleOptions.map(({ key, label, icon: Icon }) => <button key={key} type="button" onClick={() => { if (key === 'admin') { navigate('admin-login'); return; } setRole(key); setId(''); setPassword(''); setOtp(''); setErrors({}); }} className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold transition-all ${role === key ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'}`}><Icon className="w-4 h-4" />{label}</button>)}</div>}
+      <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-ink-100 mb-6">{roleOptions.map(({ key, label, icon: Icon }) => <button key={key} type="button" onClick={() => { setRole(key); setId(''); setPassword(''); setOtp(''); setErrors({}); }} className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-semibold transition-all ${role === key ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'}`}><Icon className="w-4 h-4" />{label}</button>)}</div>
       <h1 className="text-2xl font-bold text-ink-900">{title}</h1>
       <p className="text-ink-500 mt-1 text-sm">{activeRole === 'organization' ? 'Access your organization compliance workspace.' : activeRole === 'admin' ? 'Access the administrative complaint and jurisdiction panel.' : 'Access your officer inspection workspace.'}</p>
       <form onSubmit={handleSubmit} className="mt-6 space-y-4">
