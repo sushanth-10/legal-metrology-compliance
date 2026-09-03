@@ -67,6 +67,9 @@ MAX_UPLOAD_BYTES = max(1, int(os.getenv("MAX_UPLOAD_BYTES", "10485760")))
 ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 GEMINI_MAX_IMAGE_DIMENSION = 3000
 GEMINI_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+GEMINI_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "15")))
+GEMINI_FALLBACK_TIMEOUT_SECONDS = max(GEMINI_REQUEST_TIMEOUT_SECONDS, float(os.getenv("GEMINI_FALLBACK_TIMEOUT_SECONDS", "20")))
+GEMINI_TOTAL_TIMEOUT_SECONDS = max(GEMINI_FALLBACK_TIMEOUT_SECONDS, float(os.getenv("GEMINI_TOTAL_TIMEOUT_SECONDS", "25")))
 _SUPABASE_BUCKET_READY = False
 _SUPABASE_BUCKET_LOCK = Lock()
 
@@ -1099,6 +1102,16 @@ def _gemini_error_code(error: Exception) -> int | None:
     return None
 
 
+def _is_gemini_transient_error(error: Exception) -> bool:
+    error_text = str(error).lower()
+    status_code = _gemini_error_code(error)
+    return (
+        status_code is not None and status_code >= 500
+    ) or isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError, URLError)) or any(
+        marker in error_text for marker in ("timed out", "timeout", "connection reset", "connection refused", "temporarily unavailable")
+    )
+
+
 def _configured_gemini_credentials() -> list[tuple[str, str]]:
     primary_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not primary_key:
@@ -1107,14 +1120,9 @@ def _configured_gemini_credentials() -> list[tuple[str, str]]:
     fallback_model = GEMINI_FALLBACK_MODEL
     credentials = [(primary_key, primary_model)]
     if fallback_model and fallback_model != primary_model:
-        credentials.append((primary_key, fallback_model))
-    configured_keys: list[str] = []
-    for value in ((os.getenv("GEMINI_API_KEY_FALLBACK") or ""), (os.getenv("GEMINI_API_KEYS") or "")):
-        configured_keys.extend(item.strip() for item in value.split(",") if item.strip())
-    for key in dict.fromkeys(configured_keys):
-        if key != primary_key:
-            credentials.append((key, fallback_model or primary_model))
-    return list(dict.fromkeys(credentials))
+        fallback_key = (os.getenv("GEMINI_API_KEY_FALLBACK") or "").strip() or primary_key
+        credentials.append((fallback_key, fallback_model))
+    return credentials
 
 
 async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
@@ -1130,77 +1138,94 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
 
     response = None
     last_error: Exception | None = None
-    for credential_index, (api_key, model) in enumerate(credentials):
-        client = genai.Client(api_key=api_key)
-        quota_exhausted = False
-        for attempt in range(1, 4):
-            try:
-                logger.info("[GEMINI] Attempt %d using configured credential %d", attempt, credential_index + 1)
-                request_started = time.perf_counter()
-                logger.info("[GEMINI] Request started")
-                generate_kwargs: dict[str, Any] = {"model": model, "contents": contents}
-                # Current SDKs accept deterministic JSON generation. Avoid probing
-                # with a second request when a lightweight test double is in use.
-                if "unittest.mock" not in type(client.models.generate_content).__module__:
-                    generate_kwargs["config"] = types.GenerateContentConfig(
-                        temperature=0,
-                        response_mime_type="application/json",
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                    )
-                response = client.models.generate_content(**generate_kwargs)
-                logger.info("[GEMINI] Response received: %.2fs", time.perf_counter() - request_started)
-                logger.info("[GEMINI] Success")
-                break
-            except Exception as error:
-                last_error = error
-                error_text = str(error)
-                status_code = _gemini_error_code(error)
-                is_auth_error = (
-                    status_code == 401
-                    or "UNAUTHENTICATED" in error_text
-                    or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_text
+    total_started = time.perf_counter()
+    for credential_index, (api_key, model) in enumerate(credentials[:2]):
+        label = "Fallback" if credential_index > 0 else "Primary"
+        remaining_seconds = GEMINI_TOTAL_TIMEOUT_SECONDS - (time.perf_counter() - total_started)
+        if remaining_seconds <= 0:
+            break
+        configured_timeout = GEMINI_FALLBACK_TIMEOUT_SECONDS if credential_index else GEMINI_REQUEST_TIMEOUT_SECONDS
+        request_timeout = min(configured_timeout, remaining_seconds)
+        request_started = time.perf_counter()
+        try:
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=int(GEMINI_TOTAL_TIMEOUT_SECONDS * 1000)),
+            )
+            logger.info("[GEMINI] %s model: %s", label, model)
+            logger.info("[GEMINI] %s request started", label)
+            generate_kwargs: dict[str, Any] = {"model": model, "contents": contents}
+            if "unittest.mock" not in type(client.models.generate_content).__module__:
+                generate_kwargs["config"] = types.GenerateContentConfig(
+                    temperature=0,
+                    max_output_tokens=4096,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 )
-                is_quota_error = status_code == 429 or "RESOURCE_EXHAUSTED" in error_text or "quota" in error_text.lower()
-                is_transient_error = status_code is not None and status_code >= 500
-
-                if is_auth_error:
-                    raise HTTPException(
-                        status_code=502,
-                        detail=(
-                            "Gemini rejected GEMINI_API_KEY. Create a fresh Gemini API key in Google AI Studio, "
-                            "replace GEMINI_API_KEY in the backend .env file, and restart Uvicorn."
-                        ),
-                    ) from error
-                if is_quota_error:
-                    if credential_index + 1 < len(credentials):
-                        logger.warning("[GEMINI] Quota exhausted for configured model/credential %d; switching to the next configured fallback.", credential_index + 1)
-                        quota_exhausted = True
-                        break
-                    raise HTTPException(
-                        status_code=429,
-                        detail=(
-                            "Gemini request quota is exhausted for the configured models. "
-                            "Wait for the quota to reset, enable billing, or set GEMINI_API_KEY_FALLBACK "
-                            "or GEMINI_API_KEYS with a key from another Google project."
-                        ),
-                    ) from error
-                if not is_transient_error:
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Gemini image analysis is temporarily unavailable. Check the backend log and try again.",
-                    ) from error
-                if attempt < 3:
-                    delay = 2 if attempt == 1 else 5
-                    logger.warning("[GEMINI] %s received, retrying in %d seconds", status_code or "temporary failure", delay)
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error("[GEMINI] All %d attempts failed", attempt)
-                    raise HTTPException(status_code=503, detail="AI analysis service is temporarily unavailable. Please try again.") from error
-        if response is not None:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(client.models.generate_content, **generate_kwargs),
+                timeout=request_timeout,
+            )
+            elapsed = time.perf_counter() - request_started
+            if label == "Fallback":
+                logger.info("[GEMINI] Fallback completed in %.2fs", elapsed)
+                logger.info("[GEMINI] Fallback success")
+            else:
+                logger.info("[GEMINI] Primary response: %.2fs", elapsed)
             break
-        if not quota_exhausted:
-            break
+        except Exception as error:
+            last_error = error
+            error_text = str(error)
+            status_code = _gemini_error_code(error)
+            elapsed = time.perf_counter() - request_started
+            logger.error(
+                "[GEMINI] %s failed: status=%s type=%s error=%s",
+                label,
+                status_code or "unknown",
+                type(error).__name__,
+                error,
+            )
+            is_auth_error = (
+                status_code == 401
+                or "UNAUTHENTICATED" in error_text
+                or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_text
+            )
+            is_quota_error = status_code == 429 or "RESOURCE_EXHAUSTED" in error_text or "quota" in error_text.lower()
 
+            if is_auth_error:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Gemini rejected GEMINI_API_KEY. Create a fresh Gemini API key in Google AI Studio, "
+                        "replace GEMINI_API_KEY in the backend .env file, and restart Uvicorn."
+                    ),
+                ) from error
+            if is_quota_error:
+                if credential_index + 1 < len(credentials):
+                    logger.warning("[GEMINI] %s failed after %.2fs", label, elapsed)
+                    logger.info("[GEMINI] Switching to fallback model: %s", credentials[credential_index + 1][1])
+                    continue
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Gemini request quota is exhausted for the configured models. "
+                        "Wait for the quota to reset, enable billing, or set GEMINI_API_KEY_FALLBACK "
+                        "or GEMINI_API_KEYS with a key from another Google project."
+                    ),
+                ) from error
+            if _is_gemini_transient_error(error):
+                logger.warning("[GEMINI] %s failed/timeout after %.2fs", label, elapsed)
+                if credential_index + 1 < len(credentials):
+                    logger.info("[GEMINI] Switching to fallback model: %s", credentials[credential_index + 1][1])
+                    continue
+                break
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini image analysis is temporarily unavailable. Check the backend log and try again.",
+            ) from error
+
+    logger.info("[GEMINI] Total Gemini time: %.2fs", time.perf_counter() - total_started)
     if response is None:
         raise HTTPException(status_code=503, detail="AI analysis service is temporarily unavailable. Please try again.") from last_error
     text = getattr(response, "text", None)
