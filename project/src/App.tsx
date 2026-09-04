@@ -51,6 +51,10 @@ function CurrentPage() {
     return <Dashboard />;
   }
 
+  if (role === 'organization' && (page === 'complaints' || page === 'reports')) {
+    return <Dashboard />;
+  }
+
   switch (page) {
     case 'dashboard':
       return role === 'admin' ? <AdminDashboard /> : <Dashboard />;

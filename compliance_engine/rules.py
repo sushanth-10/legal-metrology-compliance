@@ -12,7 +12,10 @@ from typing import Callable, Iterable
 
 from .models import AssessmentTarget, ExtractedPackage, FieldObservation, ObservationState, QuantityBasis, RuleOutcome, Status
 
-_INDIAN_CURRENCY = re.compile(r"(?:\u20b9|rs\.?|inr)\s*\d+(?:\.\d{1,2})?", re.I)
+# Rule 6(1)(e) permits the amount to be prefixed by either the rupee sign or
+# the printed ``Rs.`` abbreviation. Accept common OCR spacing/punctuation
+# variants without accepting a bare number as an MRP declaration.
+_INDIAN_CURRENCY = re.compile(r"(?:\u20b9|r\s*\.?\s*s|rs|inr)\s*\.?\s*[:.]?\s*\d+(?:[.,]\d{1,2})?", re.I)
 _MRP_LABEL = re.compile(r"(?:mrp|maximum\s+retail\s+price|retail\s+sale\s+price)", re.I)
 _ALL_TAXES = re.compile(r"(?:inclusive\s+of\s+all\s+taxes|incl\.?\s*(?:of\s*)?all\s+taxes)", re.I)
 _DATE = re.compile(r"(?:\d{1,2}[/-]\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*[-,]?\s*\d{2,4})", re.I)
@@ -28,7 +31,17 @@ _ADDRESS = re.compile(r"\b\d{6}\b|(?:,|;).+", re.S)
 
 def _outcome(rule_id: str, title: str, status: Status, reference: str, explanation: str, observation: FieldObservation | None = None) -> RuleOutcome:
     evidence = (observation.evidence or observation.value or "") if observation else ""
-    return RuleOutcome(rule_id, title, status, reference, explanation, evidence)
+    return RuleOutcome(
+        rule_id,
+        title,
+        status,
+        reference,
+        explanation,
+        evidence,
+        observation.source_image if observation else None,
+        observation.source_image_ref if observation else None,
+        observation.bounding_box if observation else None,
+    )
 
 
 def _can_conclude_noncompliance(package: ExtractedPackage) -> bool:
@@ -54,15 +67,65 @@ def _complete_addressed_entity(value: str) -> bool:
     return len(value.strip()) >= 8 and bool(_ADDRESS.search(value))
 
 
+def _entity_name_tokens(value: str) -> set[str]:
+    generic = {
+        "address", "by", "company", "india", "importer", "limited", "ltd",
+        "manufactured", "manufacturer", "marketed", "mfg", "mkt", "packer",
+        "pvt", "the", "and",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]{4,}", value.lower())
+        if token not in generic
+    }
+
+
+def _entity_with_related_address(entity: FieldObservation, contact: FieldObservation) -> FieldObservation | None:
+    """Join split but explicitly repeated package declarations.
+
+    Some packages print the legal entity beside ``Mfg. & Mkt. by`` and print
+    that same entity again above its consumer-services postal address.  Treat
+    this as one evidence-backed declaration only when the address is present
+    and every distinctive entity token is repeated in the contact block.
+    """
+    if (
+        entity.state is not ObservationState.PRESENT
+        or not entity.value
+        or contact.state is not ObservationState.PRESENT
+        or not contact.value
+        or not _complete_addressed_entity(contact.value)
+    ):
+        return None
+    tokens = _entity_name_tokens(entity.value)
+    if not tokens or not tokens.issubset(_entity_name_tokens(contact.value)):
+        return None
+    same_image = entity.source_image is not None and entity.source_image == contact.source_image
+    return FieldObservation(
+        state=ObservationState.PRESENT,
+        value=f"{entity.value} :: Related address/contact declaration: {contact.value}",
+        confidence=max(entity.confidence or 0.0, contact.confidence or 0.0) or None,
+        evidence=f"{entity.evidence or entity.value} :: Related address/contact declaration: {contact.evidence or contact.value}",
+        source_image=entity.source_image if same_image else None,
+        source_image_ref=entity.source_image_ref if same_image else None,
+        bounding_box=entity.bounding_box if same_image else None,
+    )
+
+
 # Rule 6(1)(a): name and address of manufacturer/packer/importer, as applicable.
 def responsible_entity_check(package: ExtractedPackage) -> RuleOutcome:
     reference = "LMPC Rules, 2011, Rule 6(1)(a)"
-    fields = (package.manufacturer, package.packer, package.importer)
-    if any(field.state is ObservationState.PRESENT and field.value and _complete_addressed_entity(field.value) for field in fields):
-        return _outcome("R6_1_A_ENTITY", "Manufacturer/packer/importer name and address", Status.COMPLIANT, reference, "A responsible entity declaration includes an identifiable name and address.")
+    related_manufacturer = _entity_with_related_address(package.manufacturer, package.consumer_care)
+    fields = [package.manufacturer, package.packer, package.importer]
+    if related_manufacturer:
+        fields.append(related_manufacturer)
+    complete_field = next((field for field in fields if field.state is ObservationState.PRESENT and field.value and _complete_addressed_entity(field.value)), None)
+    if complete_field:
+        return _outcome("R6_1_A_ENTITY", "Manufacturer/packer/importer name and address", Status.COMPLIANT, reference, "A responsible entity declaration includes an identifiable name and address.", complete_field)
     if _can_conclude_noncompliance(package) and all(field.state in (ObservationState.PRESENT, ObservationState.CONFIRMED_ABSENT) for field in fields):
-        return _outcome("R6_1_A_ENTITY", "Manufacturer/packer/importer name and address", Status.VIOLATION, reference, "No inspected entity declaration contains both name and a verifiable address.")
-    return _unverified("R6_1_A_ENTITY", "Manufacturer/packer/importer name and address", reference)
+        evidence_field = next((field for field in fields if field.state is ObservationState.PRESENT), None)
+        return _outcome("R6_1_A_ENTITY", "Manufacturer/packer/importer name and address", Status.VIOLATION, reference, "No inspected entity declaration contains both name and a verifiable address.", evidence_field)
+    evidence_field = next((field for field in fields if field.state is ObservationState.PRESENT), None)
+    return _unverified("R6_1_A_ENTITY", "Manufacturer/packer/importer name and address", reference, evidence_field)
 
 
 # Rule 6(1)(aa), inserted by G.S.R. 629(E) (2017): imported packages.
@@ -120,8 +183,39 @@ def best_before_check(package: ExtractedPackage) -> Iterable[RuleOutcome]:
 
 # Rule 6(1)(e), substituted by the 2017 amendment: Indian currency and all-taxes wording.
 def mrp_check(package: ExtractedPackage) -> RuleOutcome:
-    validator = lambda text: bool(_MRP_LABEL.search(text) and _INDIAN_CURRENCY.search(text) and _ALL_TAXES.search(text))
-    return _field_check("R6_1_E", "MRP/retail sale price inclusive of all taxes", "LMPC Rules, 2011, Rule 6(1)(e)", package, package.mrp, validator)
+    observation = package.mrp
+    if observation.state is ObservationState.PRESENT:
+        # The extractor may place the full printed declaration in ``evidence``
+        # while ``value`` contains only a parsed price. Validate the complete
+        # existing evidence in that case; do not infer or synthesize text.
+        if is_valid_mrp_declaration(observation.value or ""):
+            return _outcome("R6_1_E", "MRP/retail sale price inclusive of all taxes", Status.COMPLIANT, "LMPC Rules, 2011, Rule 6(1)(e)", "The required declaration is present and satisfies this check.", observation)
+        if is_valid_mrp_declaration(observation.evidence or ""):
+            evidence_observation = FieldObservation(
+                state=observation.state,
+                value=observation.evidence,
+                confidence=observation.confidence,
+                evidence=observation.evidence,
+                source_image=observation.source_image,
+                source_image_ref=observation.source_image_ref,
+                bounding_box=observation.bounding_box,
+            )
+            return _outcome("R6_1_E", "MRP/retail sale price inclusive of all taxes", Status.COMPLIANT, "LMPC Rules, 2011, Rule 6(1)(e)", "The required declaration is present and satisfies this check.", evidence_observation)
+
+    def validator(text: str) -> bool:
+        return is_valid_mrp_declaration(text)
+
+    return _field_check("R6_1_E", "MRP/retail sale price inclusive of all taxes", "LMPC Rules, 2011, Rule 6(1)(e)", package, observation, validator)
+
+
+def is_valid_mrp_declaration(text: str) -> bool:
+    """Return whether extracted MRP text contains all required components."""
+    # OCR commonly inserts spaces into ``R.S.``/``INCL.`` or uses a comma
+    # as the decimal separator. Normalize only those harmless forms; the MRP
+    # label, currency amount, and inclusive-tax wording remain independently
+    # required.
+    normalized = " ".join(text.replace("\u00a0", " ").split())
+    return bool(_MRP_LABEL.search(normalized) and _INDIAN_CURRENCY.search(normalized) and _ALL_TAXES.search(normalized))
 
 
 def _valid_unit_price(text: str, basis: QuantityBasis | None) -> bool:
@@ -186,16 +280,6 @@ def dietary_origin_mark_check(package: ExtractedPackage) -> Iterable[RuleOutcome
         yield _field_check("R6_8_ORIGIN_MARK", "Vegetarian/non-vegetarian origin mark", reference, package, package.dietary_origin_mark, lambda text: bool(text.strip()))
 
 
-# Rule 6(10A), inserted by the 2026 amendment effective 1 July 2026: imported-product listing filter.
-def ecommerce_filter_check(package: ExtractedPackage) -> Iterable[RuleOutcome]:
-    reference = "LMPC Rules, 2011, Rule 6(10A), inserted by 2026 amendment"
-    applicable = package.context.is_ecommerce_entity_offering_imported_product
-    if applicable is None:
-        yield _unverified("R6_10A", "E-commerce country-of-origin searchable/sortable filter", reference)
-    elif applicable:
-        yield _field_check("R6_10A", "E-commerce country-of-origin searchable/sortable filter", reference, package, package.ecommerce_country_of_origin_filter, lambda text: bool(re.search(r"searchable", text, re.I) and re.search(r"sortable", text, re.I)))
-
-
 @dataclass(frozen=True)
 class RuleSet:
     """Composition point for later gazette amendments and category-specific overlays."""
@@ -214,5 +298,4 @@ class RuleSet:
         outcomes.extend(consumer_care_check(package))
         outcomes.extend(gm_food_check(package))
         outcomes.extend(dietary_origin_mark_check(package))
-        outcomes.extend(ecommerce_filter_check(package))
         return tuple(outcomes)

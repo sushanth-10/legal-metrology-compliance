@@ -62,6 +62,11 @@ class FieldObservation:
     value: Optional[str] = None
     confidence: Optional[float] = None
     evidence: str = ""
+    # Provenance supplied by the extractor.  The index is zero-based and
+    # refers to the uploaded image list for the scan.
+    source_image: Optional[int] = None
+    source_image_ref: Optional[str] = None
+    bounding_box: Optional[dict[str, object]] = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +89,6 @@ class PackageContext:
     is_genetically_modified_food: Optional[bool] = None
     requires_vegetarian_origin_mark: Optional[bool] = None
     assessment_target: AssessmentTarget = AssessmentTarget.PACKAGE_LABEL
-    is_ecommerce_entity_offering_imported_product: Optional[bool] = None
     inspected_relevant_label_surfaces: bool = False
 
 
@@ -106,7 +110,6 @@ class ExtractedPackage:
     component_names_and_quantities: FieldObservation = field(default_factory=FieldObservation)
     gm_mark: FieldObservation = field(default_factory=FieldObservation)
     dietary_origin_mark: FieldObservation = field(default_factory=FieldObservation)
-    ecommerce_country_of_origin_filter: FieldObservation = field(default_factory=FieldObservation)
     context: PackageContext = field(default_factory=PackageContext)
 
 
@@ -118,6 +121,9 @@ class RuleOutcome:
     legal_reference: str
     explanation: str
     evidence: str = ""
+    source_image: Optional[int] = None
+    source_image_ref: Optional[str] = None
+    bounding_box: Optional[dict[str, object]] = None
 
 
 @dataclass(frozen=True)

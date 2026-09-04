@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, Clock3, Eye, FileWarning, Loader2, ShieldCheck } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock3, Eye, FileWarning, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useApp } from '@/store';
 import { apiJson } from '@/lib/api';
 import { EmptyState, PageHeader } from '@/components/ui';
@@ -7,17 +7,23 @@ import type { Complaint, ComplaintStatus } from '@/types';
 
 type AdminStats = { total_complaints: number; new: number; viewed?: number; in_progress?: number; under_review: number; investigating: number; action_taken: number; resolved: number; requires_attention: number };
 type AdminFilters = { states: string[]; districts: string[]; categories: string[] };
+type AdminOfficer = { id: string; officerId?: string | null; name: string; email: string; location: string; state: string; district: string };
 
 const statusLabel: Record<string, string> = { new: 'New', viewed: 'Viewed', 'in-progress': 'In Progress', review: 'In Progress', investigating: 'In Progress', 'action-taken': 'Action Taken', resolved: 'Resolved', closed: 'Closed' };
 const statusClass: Record<string, string> = { new: 'bg-brand-50 text-brand-700', viewed: 'bg-warning-50 text-warning-700', 'in-progress': 'bg-warning-50 text-warning-700', review: 'bg-warning-50 text-warning-700', investigating: 'bg-purple-50 text-purple-700', 'action-taken': 'bg-purple-50 text-purple-700', resolved: 'bg-success-50 text-success-700', closed: 'bg-ink-100 text-ink-700' };
 
-function formatDate(value?: string) { return value ? new Date(value).toLocaleString() : '—'; }
+function formatDate(value?: string) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
 
 export function AdminDashboard({ initialSection }: { initialSection?: 'complaints' } = {}) {
   const { user, complaintsLoading, updateComplaintStatus, showToast } = useApp();
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [filters, setFilters] = useState<AdminFilters>({ states: [], districts: [], categories: [] });
   const [rows, setRows] = useState<Complaint[]>([]);
+  const [officers, setOfficers] = useState<AdminOfficer[]>([]);
   const [selected, setSelected] = useState<Complaint | null>(null);
   const [query, setQuery] = useState({ search: '', state: user.state || '', district: user.district || '', status: '', category: '', date: '' });
   const [remark, setRemark] = useState('');
@@ -27,17 +33,23 @@ export function AdminDashboard({ initialSection }: { initialSection?: 'complaint
     setLoading(true);
     try {
       const params = new URLSearchParams(Object.entries(query).filter(([, value]) => value));
-      const [nextStats, nextRows] = await Promise.all([
+      const [nextStats, nextRows, nextOfficers] = await Promise.all([
         apiJson<AdminStats>(`/api/admin/dashboard${query.state || query.district ? `?${new URLSearchParams({ ...(query.state ? { state: query.state } : {}), ...(query.district ? { district: query.district } : {}) })}` : ''}`),
         apiJson<Complaint[]>(`/api/admin/complaints${params.toString() ? `?${params}` : ''}`),
+        apiJson<AdminOfficer[]>('/api/admin/officers'),
       ]);
-      setStats(nextStats); setRows(nextRows); setSelected((current) => current ? nextRows.find((item) => item.id === current.id) || current : null);
+      setStats(nextStats); setRows(nextRows); setOfficers(nextOfficers); setSelected((current) => current ? nextRows.find((item) => item.id === current.id) || current : null);
     } catch (error) { showToast('error', error instanceof Error ? error.message : 'Admin data could not be loaded.'); }
     finally { setLoading(false); }
   }, [query, showToast]);
 
   useEffect(() => { void apiJson<AdminFilters>('/api/admin/filters').then(setFilters).catch((error) => showToast('error', error instanceof Error ? error.message : 'Admin filters could not be loaded.')); }, [showToast]);
   useEffect(() => { const timer = window.setTimeout(() => { void load(); }, 250); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => {
+    const refreshOnFocus = () => { if (document.visibilityState === 'visible') void load(); };
+    window.addEventListener('focus', refreshOnFocus);
+    return () => window.removeEventListener('focus', refreshOnFocus);
+  }, [load]);
 
   const open = async (complaint: Complaint) => {
     try { const detail = await apiJson<Complaint>(`/api/complaints/${encodeURIComponent(complaint.id)}`); setSelected(detail); setRemark(detail.adminRemark || ''); }
@@ -60,8 +72,9 @@ export function AdminDashboard({ initialSection }: { initialSection?: 'complaint
   ] as const : [];
 
   return <div>
-    <PageHeader title="Admin Panel" subtitle={`Administrative oversight for ${user.state || 'all available'}${user.district ? ` • ${user.district}` : ''}.`} />
+    <PageHeader title="Admin Panel" subtitle={`Administrative oversight for ${user.state || 'all available'}${user.district ? ` • ${user.district}` : ''}.`} actions={<button onClick={() => void load()} disabled={loading} className="btn-secondary"><RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button>} />
     <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-6">{statCards.map(([label, value, Icon, color]) => <div className="card p-4" key={label}><Icon className={`w-5 h-5 ${color}`} /><p className="text-2xl font-bold text-ink-900 mt-2">{value}</p><p className="text-xs text-ink-500 mt-1">{label}</p></div>)}</div>
+    <section className="card p-4 mb-5"><div className="flex items-center justify-between gap-3"><div><h2 className="font-semibold text-ink-900">Officer jurisdictions</h2><p className="text-sm text-ink-500 mt-1">Persisted officer profile locations in your administrative scope.</p></div><ShieldCheck className="w-5 h-5 text-brand-600" /></div>{officers.length ? <div className="mt-4 grid md:grid-cols-2 xl:grid-cols-3 gap-3">{officers.map((officer) => <div key={officer.id} className="rounded-xl border border-ink-200 p-3"><p className="font-medium text-ink-900">{officer.name}</p><p className="text-xs text-ink-500 mt-1">{officer.officerId || officer.email || 'Officer account'}</p><p className="text-sm text-ink-700 mt-2">{officer.location || 'Location not provided'}</p><p className="text-xs text-ink-500 mt-1">{[officer.district, officer.state].filter(Boolean).join(', ') || 'Jurisdiction not provided'}</p></div>)}</div> : <p className="mt-4 text-sm text-ink-500">No officer profiles are available in this jurisdiction.</p>}</section>
     {initialSection && <div className="mb-4 text-sm font-semibold text-brand-700 flex items-center gap-2"><ShieldCheck className="w-4 h-4" /> Complaint management</div>}
     <section className="card p-4 mb-5"><div className="grid md:grid-cols-3 xl:grid-cols-6 gap-3">
       <input className="input" placeholder="Search complaints" value={query.search} onChange={(e) => setQuery({ ...query, search: e.target.value })} />

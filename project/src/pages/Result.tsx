@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  Award,
   FileText,
   Save,
   RotateCcw,
@@ -16,9 +17,9 @@ import {
 } from 'lucide-react';
 import { useApp } from '@/store';
 import { Confidence } from '@/components/ui';
-import { downloadReportAsPdf } from '@/lib/reporting';
+import { downloadCertificateAsPdf, downloadReportAsPdf } from '@/lib/reporting';
 import { apiJson } from '@/lib/api';
-import type { ComplianceStatus, Declaration, BoundingBox, GeneratedReport, OfficerReview, OfficerReviewStatus } from '@/types';
+import type { ComplianceCertificate, ComplianceStatus, Declaration, BoundingBox, GeneratedReport, OfficerReview, OfficerReviewStatus } from '@/types';
 
 const statusConfig: Record<
   ComplianceStatus,
@@ -178,6 +179,9 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
   const scan = scans.find((s) => s.id === selectedScanId) ?? scans[0];
   const [showMrp, setShowMrp] = useState(true);
   const [previewReport, setPreviewReport] = useState<GeneratedReport | null>(null);
+  const [certificate, setCertificate] = useState<ComplianceCertificate | null>(null);
+  const [certificateLoading, setCertificateLoading] = useState(false);
+  const [certificateError, setCertificateError] = useState<string | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [review, setReview] = useState<OfficerReview>(() => ({
@@ -195,13 +199,27 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
     }
   }, [scan?.id, scan?.officerReview]);
 
+  useEffect(() => {
+    if (role !== 'organization' || !scan?.id || !scan.certificateEligible) {
+      setCertificate(null);
+      return;
+    }
+    let mounted = true;
+    setCertificateLoading(true);
+    apiJson<ComplianceCertificate>(`/api/certificates/scan/${encodeURIComponent(scan.id)}`)
+      .then((existing) => { if (mounted) setCertificate(existing); })
+      .catch(() => { if (mounted) setCertificate(null); })
+      .finally(() => { if (mounted) setCertificateLoading(false); });
+    return () => { mounted = false; };
+  }, [role, scan?.id, scan?.certificateEligible]);
+
   if (!scan) return null;
 
   const cfg = statusConfig[scan.status];
   const detected = scan.declarations.filter((d) => d.detected).length;
   const total = scan.declarations.length;
   const boxes = scan.declarations.map((d) => d.region).filter(Boolean) as BoundingBox[];
-  const generatedReport = reports.find((report) => report.scanId === scan.id) ?? null;
+  const generatedReport = role === 'officer' ? reports.find((report) => report.scanId === scan.id) ?? null : null;
   const images = scan.images && scan.images.length > 0 ? scan.images : [scan.image];
   const score = scan.complianceScore ?? 0;
 
@@ -216,6 +234,21 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
     } catch (error) {
       console.error(error);
       setReportError(error instanceof Error ? error.message : 'Unable to generate the PDF report from the current scan result.');
+    }
+  };
+
+  const handleGenerateCertificate = async () => {
+    if (role !== 'organization' || !scan.certificateEligible) return;
+    setCertificateLoading(true);
+    setCertificateError(null);
+    try {
+      const created = await apiJson<ComplianceCertificate>(`/api/certificates/${encodeURIComponent(scan.id)}`, { method: 'POST' });
+      setCertificate(created);
+      showToast('success', 'Compliance certificate generated and saved.');
+    } catch (error) {
+      setCertificateError(error instanceof Error ? error.message : 'The compliance certificate could not be generated.');
+    } finally {
+      setCertificateLoading(false);
     }
   };
 
@@ -488,6 +521,12 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
         </div>
       )}
 
+      {certificateError && (
+        <div className="rounded-xl border border-danger-200 bg-danger-50 p-3 text-sm text-danger-700">
+          {certificateError}
+        </div>
+      )}
+
       {role === 'officer' && <section className="card p-5 sm:p-6"><div><h3 className="font-semibold text-ink-900">Officer Review</h3><p className="text-sm text-ink-500 mt-1">The AI result is a preliminary assessment. Review and confirm it before generating the final report.</p></div><div className="grid sm:grid-cols-2 gap-4 mt-5"><label className="text-sm text-ink-600">Officer Name<input className="input mt-1" value={review.officer_name} onChange={(e) => setReview({ ...review, officer_name: e.target.value })} /></label><label className="text-sm text-ink-600">Designation<input className="input mt-1" value={review.designation} onChange={(e) => setReview({ ...review, designation: e.target.value })} /></label><label className="text-sm text-ink-600">Department / Office<input className="input mt-1" value={review.department} onChange={(e) => setReview({ ...review, department: e.target.value })} /></label><label className="text-sm text-ink-600">Inspection Location<input className="input mt-1" value={review.inspection_location} onChange={(e) => setReview({ ...review, inspection_location: e.target.value })} /></label><label className="text-sm text-ink-600">Inspection Date<input type="datetime-local" className="input mt-1" value={review.inspection_date} onChange={(e) => setReview({ ...review, inspection_date: e.target.value })} /></label><label className="text-sm text-ink-600">Review Status<select className="input mt-1" value={review.review_status} onChange={(e) => setReview({ ...review, review_status: e.target.value as OfficerReviewStatus })}><option>Verified</option><option>Requires Further Verification</option><option>Non-Compliant Confirmed</option><option>No Violation Found</option></select></label><label className="text-sm text-ink-600 sm:col-span-2">Inspection Remarks<textarea className="input mt-1 min-h-24" value={review.inspection_remarks} onChange={(e) => setReview({ ...review, inspection_remarks: e.target.value })} /></label><label className="text-sm text-ink-600 sm:col-span-2">Recommended Action<textarea className="input mt-1 min-h-24" value={review.recommended_action} onChange={(e) => setReview({ ...review, recommended_action: e.target.value })} /></label></div><div className="flex items-center justify-end gap-3 mt-4"><span className="text-sm text-success-700">{reviewSaved ? 'Review saved' : ''}</span><button className="btn-primary" onClick={() => void saveReview()} disabled={reviewSaving}>{reviewSaving ? 'Saving…' : 'Save inspection review'}</button></div></section>}
 
       {/* Actions */}
@@ -501,6 +540,21 @@ export function Result({ onScanAnother }: { onScanAnother: () => void }) {
           <button onClick={() => setPreviewReport(generatedReport)} className="btn-secondary flex-1 py-3">
             <FileText className="w-4 h-4" /> View Report
           </button>
+        )}
+        {role === 'organization' && scan.certificateEligible && !certificate && (
+          <button onClick={() => void handleGenerateCertificate()} disabled={certificateLoading} className="btn-primary flex-1 py-3">
+            <Award className="w-4 h-4" /> {certificateLoading ? 'Generating Certificate…' : 'Generate Compliance Certificate'}
+          </button>
+        )}
+        {role === 'organization' && scan.certificateEligible && certificate && (
+          <button onClick={() => void downloadCertificateAsPdf(certificate)} className="btn-secondary flex-1 py-3">
+            <Save className="w-4 h-4" /> Download Compliance Certificate
+          </button>
+        )}
+        {role === 'organization' && !scan.certificateEligible && (
+          <div className="flex-1 rounded-xl border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-800">
+            Compliance certificate unavailable: {scan.certificateEligibilityReason || 'this scan does not meet all eligibility requirements.'}
+          </div>
         )}
         {generatedReport && (
           <button onClick={() => void downloadReportAsPdf(generatedReport)} className="btn-secondary flex-1 py-3">

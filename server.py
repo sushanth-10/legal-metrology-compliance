@@ -13,14 +13,13 @@ from functools import lru_cache
 from threading import Lock
 from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
@@ -28,7 +27,7 @@ from google.genai import types
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env", override=False)
 
 from compliance_engine import (
     ComplianceEngine,
@@ -38,16 +37,34 @@ from compliance_engine import (
     PackageContext,
     QuantityBasis,
 )
+from compliance_engine.rules import is_valid_mrp_declaration
 from database import STORAGE_DIR, connect, create_token, create_user, init_db, iso_datetime, json_value, new_id, user_from_token, verify_password
-from pdf_reports import create_pdf
+from pdf_reports import create_certificate_pdf, create_pdf
 
 app = FastAPI(title="NIRIKSHA Package Compliance API")
+
+# R6_10A was a former e-commerce listing metric. It is intentionally no
+# longer evaluated, but older scans may still contain persisted rows. Keep
+# those legacy rows in the database for auditability while excluding them
+# from all application-facing result/report/analytics views.
+EXCLUDED_LEGACY_RULE_IDS = {"R6_10A"}
+
+
+def _configured_origins() -> list[str]:
+    """Read exact browser origins allowed to call the API.
+
+    Keep credentials enabled without allowing every website. The deployed
+    frontend origin(s) belong in FRONTEND_ORIGINS on the backend host.
+    """
+    raw_origins = os.getenv("FRONTEND_ORIGINS", "")
+    configured = [origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()]
+    local = ["http://127.0.0.1:5173", "http://localhost:5173"]
+    return list(dict.fromkeys(local + configured))
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-    ],
+    allow_origins=_configured_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,6 +83,7 @@ SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 SUPABASE_SECRET_KEY = (os.getenv("SUPABASE_SECRET_KEY") or "").strip()
 SUPABASE_STORAGE_BUCKET = (os.getenv("SUPABASE_STORAGE_BUCKET") or "scan-images").strip() or "scan-images"
 SUPABASE_STORAGE_SIGNED_URL_TTL = max(60, int(os.getenv("SUPABASE_STORAGE_SIGNED_URL_TTL", "3600")))
+CERTIFICATE_VERIFICATION_BASE_URL = (os.getenv("CERTIFICATE_VERIFICATION_BASE_URL") or "").strip().rstrip("/")
 MAX_UPLOAD_BYTES = max(1, int(os.getenv("MAX_UPLOAD_BYTES", "10485760")))
 ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 GEMINI_MAX_IMAGE_DIMENSION = 3000
@@ -374,6 +392,13 @@ def _user_or_401(authorization: str | None) -> dict[str, Any]:
     return user
 
 
+def _organization_or_403(authorization: str | None) -> dict[str, Any]:
+    user = _user_or_401(authorization)
+    if user["role"] != "organization":
+        raise HTTPException(status_code=403, detail="Only organizations can access compliance certificates.")
+    return user
+
+
 def _officer_or_403(authorization: str | None) -> dict[str, Any]:
     user = _user_or_401(authorization)
     if user["role"] != "officer":
@@ -383,8 +408,8 @@ def _officer_or_403(authorization: str | None) -> dict[str, Any]:
 
 def _report_user_or_403(authorization: str | None) -> dict[str, Any]:
     user = _user_or_401(authorization)
-    if user["role"] not in {"organization", "officer", "admin"}:
-        raise HTTPException(status_code=403, detail="This account cannot access reports.")
+    if user["role"] not in {"officer", "admin"}:
+        raise HTTPException(status_code=403, detail="Only officers and admins can access official reports.")
     return user
 
 
@@ -599,12 +624,19 @@ def _complaint_list_query(user: dict[str, Any], *, search: str | None = None, st
 
 
 def _field_record(observation: FieldObservation) -> dict[str, Any]:
-    return {
+    record: dict[str, Any] = {
         "status": observation.state.value,
         "value": observation.value,
         "confidence": observation.confidence,
         "evidence": observation.evidence,
     }
+    if observation.source_image is not None:
+        record["source_image_index"] = observation.source_image
+    if observation.source_image_ref:
+        record["source_image_ref"] = observation.source_image_ref
+    if observation.bounding_box:
+        record["bounding_box"] = observation.bounding_box
+    return record
 
 
 def _package_data(package: ExtractedPackage) -> dict[str, Any]:
@@ -619,6 +651,28 @@ def _calculate_compliance_score(results: list[dict[str, Any]]) -> int:
     review = sum(1 for item in applicable if (item.get("status") or "").upper() in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED"})
     score = 100 - (violations * 25) - (review * 10)
     return max(0, min(100, score))
+
+
+def _certificate_eligibility(scan: dict[str, Any], checks: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Evaluate certificate eligibility without changing compliance results."""
+    status = str(scan.get("overall_status") or scan.get("status") or "").upper().replace("-", "_")
+    try:
+        score = int(scan.get("compliance_score") if scan.get("compliance_score") is not None else _calculate_compliance_score(checks))
+    except (TypeError, ValueError):
+        score = 0
+    applicable = [item for item in checks if str(item.get("status") or "").upper() != "NOT_APPLICABLE"]
+    mandatory_unverified = [item for item in applicable if str(item.get("status") or "").upper() in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED"}]
+    mandatory_violations = [item for item in applicable if str(item.get("status") or "").upper() == "VIOLATION"]
+    all_verified = all(str(item.get("status") or "").upper() == "COMPLIANT" for item in applicable)
+    if status != "COMPLIANT":
+        return False, "The final compliance status is not COMPLIANT."
+    if score < 90:
+        return False, "The compliance score is below the required 90/100 certificate threshold."
+    if mandatory_violations:
+        return False, "One or more applicable mandatory requirements are NON-COMPLIANT."
+    if mandatory_unverified or not all_verified:
+        return False, "One or more applicable mandatory requirements require verification."
+    return True, "All applicable mandatory requirements are verified and the score meets the certificate threshold."
 
 
 def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]], cursor: Any = None) -> dict[str, Any]:
@@ -681,6 +735,7 @@ def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]], cursor: Any =
     score = scan.get("compliance_score")
     if score is None:
         score = _calculate_compliance_score(results)
+    certificate_eligible, certificate_reason = _certificate_eligibility(scan, results)
     return {
         "id": scan["scan_id"],
         "scan_id": scan["scan_id"],
@@ -698,12 +753,14 @@ def _scan_dto(scan: dict[str, Any], results: list[dict[str, Any]], cursor: Any =
         "checks": results,
         "complianceScore": int(score),
         "officerReview": _scan_review(scan),
+        "certificateEligible": certificate_eligible,
+        "certificateEligibilityReason": certificate_reason,
     }
 
 
 def _result_rows(cursor: Any, scan_id: str) -> list[dict[str, Any]]:
-    cursor.execute("SELECT * FROM compliance_results WHERE scan_id = %s ORDER BY id", (scan_id,))
-    rows = cursor.fetchall()
+    cursor.execute("SELECT * FROM compliance_results WHERE scan_id = %s AND check_name <> 'R6_10A' ORDER BY id", (scan_id,))
+    rows = [row for row in cursor.fetchall() if row.get("check_name") not in EXCLUDED_LEGACY_RULE_IDS]
     return [
         {
                 "id": row["id"],
@@ -724,9 +781,11 @@ def _result_rows(cursor: Any, scan_id: str) -> list[dict[str, Any]]:
 def _result_rows_for_scans(cursor: Any, scan_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
     if not scan_ids:
         return {}
-    cursor.execute("SELECT * FROM compliance_results WHERE scan_id = ANY(%s) ORDER BY scan_id, id", (scan_ids,))
+    cursor.execute("SELECT * FROM compliance_results WHERE scan_id = ANY(%s) AND check_name <> 'R6_10A' ORDER BY scan_id, id", (scan_ids,))
     grouped: dict[str, list[dict[str, Any]]] = {scan_id: [] for scan_id in scan_ids}
     for row in cursor.fetchall():
+        if row.get("check_name") in EXCLUDED_LEGACY_RULE_IDS:
+            continue
         grouped.setdefault(row["scan_id"], []).append({
             "id": row["id"],
             "rule_id": row["check_name"],
@@ -892,12 +951,67 @@ def _report_list_dto(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _certificate_verification_url(request: Request, certificate_id: str) -> str:
+    base_url = CERTIFICATE_VERIFICATION_BASE_URL or str(request.base_url).rstrip("/")
+    return f"{base_url}/api/certificates/{certificate_id}/verify"
+
+
+def _certificate_dto(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+    score = row.get("compliance_score")
+    if score is None and isinstance(metadata, dict):
+        score = metadata.get("compliance_score", 0)
+    verification_url = metadata.get("verification_url") if isinstance(metadata, dict) else None
+    return {
+        "id": row["report_id"],
+        "certificateId": row["report_id"],
+        "scanId": row["scan_id"],
+        "productName": row.get("product_name") or "Product name unavailable",
+        "generatedAt": iso_datetime(row.get("generated_at")),
+        "assessmentDate": iso_datetime(row.get("scanned_at")),
+        "complianceScore": int(score or 0),
+        "status": "compliant",
+        "pdfUrl": f"/api/certificates/{row['report_id']}/pdf",
+        "verificationUrl": verification_url,
+    }
+
+
 def _json_from_response(text: str) -> Any:
-    if "```" in text:
-        fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.S | re.I)
+    candidate = text.strip()
+    if "```" in candidate:
+        fenced = re.findall(r"```(?:json)?\s*(.*?)```", candidate, flags=re.S | re.I)
         if fenced:
-            text = fenced[0].strip()
-    return json.loads(text)
+            candidate = fenced[0].strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as original_error:
+        # Gemini can occasionally append a short sentence or a second JSON
+        # fragment despite the JSON-only instruction. Recover the structured
+        # extraction object when one is present, rather than blindly choosing
+        # an unrelated wrapper object that would make every finding empty.
+        decoder = json.JSONDecoder()
+        parsed_objects: list[dict[str, Any]] = []
+        for start in (match.start() for match in re.finditer(r"[\[{]", candidate)):
+            try:
+                parsed, _end = decoder.raw_decode(candidate[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed_objects.append(parsed)
+        if parsed_objects:
+            structured = [item for item in parsed_objects if isinstance(item.get("fields"), dict)]
+            selected = max(
+                structured or parsed_objects,
+                key=lambda item: len(item.get("fields", {})) if isinstance(item.get("fields"), dict) else 0,
+            )
+            logger.warning("Gemini response contained trailing or wrapped JSON; using the structured extraction object and ignoring unrelated content.")
+            return selected
+        raise original_error
 
 
 def _normalize_status(value: Any) -> ObservationState:
@@ -917,6 +1031,30 @@ def _normalize_status(value: Any) -> ObservationState:
     return status_map.get(normalized, ObservationState.NOT_ASSESSED)
 
 
+def _structured_extraction(payload: Any) -> dict[str, Any]:
+    """Find the richest nested extraction object without inventing fields."""
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if isinstance(value, dict):
+            fields = value.get("fields")
+            if isinstance(fields, dict):
+                candidates.append((len(fields), -depth, value))
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    walk(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth + 1)
+
+    walk(payload)
+    if not candidates:
+        return payload if isinstance(payload, dict) else {}
+    # Prefer the object containing the most extracted fields. The depth tie
+    # breaker keeps the outer structured object when both are equivalent.
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
 def _field_from_record(field_name: str, record: Any) -> FieldObservation:
     if not isinstance(record, dict):
         return FieldObservation(state=ObservationState.NOT_ASSESSED)
@@ -924,9 +1062,48 @@ def _field_from_record(field_name: str, record: Any) -> FieldObservation:
     value = record.get("value")
     confidence = record.get("confidence")
     evidence = record.get("evidence") or record.get("source_text") or ""
+    # Gemini may return a parsed numeric MRP in ``value`` while keeping the
+    # complete printed declaration in ``evidence``. Preserve that existing
+    # declaration so Rule 6(1)(e) validates the evidence actually shown.
+    if (
+        field_name == "mrp"
+        and state is ObservationState.PRESENT
+        and evidence
+        and not is_valid_mrp_declaration(str(value or ""))
+        and is_valid_mrp_declaration(str(evidence))
+    ):
+        value = evidence
     bbox = record.get("bounding_box") or record.get("bbox") or {}
     if bbox and evidence:
         evidence = f"{evidence} :: {bbox}"
+    source_image: int | None = None
+    for key in ("source_image_index", "sourceImageIndex", "image_index", "source_image"):
+        raw_index = record.get(key)
+        if isinstance(raw_index, dict):
+            for nested_key in ("index", "image_index", "source_image_index"):
+                if raw_index.get(nested_key) is not None:
+                    raw_index = raw_index[nested_key]
+                    break
+        if isinstance(raw_index, str) and key == "source_image":
+            image_match = re.search(r"(?:image|img)[ _-]*(\d+)", raw_index, re.I)
+            raw_index = int(image_match.group(1)) - 1 if image_match else None
+        try:
+            parsed_index = int(raw_index) if raw_index is not None else None
+        except (TypeError, ValueError):
+            parsed_index = None
+        if parsed_index is not None and parsed_index >= 0:
+            source_image = parsed_index
+            break
+    if source_image is None:
+        raw_number = record.get("source_image_number") or record.get("sourceImageNumber")
+        try:
+            parsed_number = int(raw_number) if raw_number is not None else None
+        except (TypeError, ValueError):
+            parsed_number = None
+        if parsed_number is not None and parsed_number > 0:
+            source_image = parsed_number - 1
+    source_image_ref = record.get("source_image_ref") or record.get("sourceImageRef") or record.get("source_path")
+    normalized_bbox = bbox if isinstance(bbox, dict) and bbox else None
     try:
         normalized_confidence = float(confidence) if confidence is not None else None
     except (TypeError, ValueError):
@@ -936,6 +1113,9 @@ def _field_from_record(field_name: str, record: Any) -> FieldObservation:
         value=value if state is not ObservationState.NOT_VISIBLE else None,
         confidence=normalized_confidence,
         evidence=evidence,
+        source_image=source_image,
+        source_image_ref=str(source_image_ref) if source_image_ref else None,
+        bounding_box=normalized_bbox,
     )
 
 
@@ -988,6 +1168,10 @@ def _best_observation(observations: list[FieldObservation]) -> FieldObservation:
 
 
 def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
+    # Some Gemini responses include one or more harmless outer envelopes
+    # around the extraction object. Select the richest existing ``fields``
+    # object; do not infer or synthesize any declaration values.
+    payload = _structured_extraction(payload)
     fields = payload.get("fields", {})
     context = payload.get("context", {})
     package_context = PackageContext(
@@ -1001,7 +1185,6 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
         contains_multiple_products=_as_bool(context.get("contains_multiple_products")),
         is_genetically_modified_food=_as_bool(context.get("is_genetically_modified_food")),
         requires_vegetarian_origin_mark=_as_bool(context.get("requires_vegetarian_origin_mark")),
-        is_ecommerce_entity_offering_imported_product=_as_bool(context.get("is_ecommerce_entity_offering_imported_product")),
         # Missing coverage data must never be treated as proof that every
         # relevant label surface was inspected.
         inspected_relevant_label_surfaces=_as_bool(context.get("inspected_relevant_label_surfaces")) is True,
@@ -1033,7 +1216,6 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
         "gm_mark": "gm_mark",
         "dietary_origin_mark": "dietary_origin_mark",
         "vegetarian_non_vegetarian_mark": "dietary_origin_mark",
-        "ecommerce_country_of_origin_filter": "ecommerce_country_of_origin_filter",
     }
 
     candidates: dict[str, list[FieldObservation]] = {}
@@ -1057,7 +1239,6 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
         component_names_and_quantities=extra_fields.get("component_names_and_quantities", FieldObservation(state=ObservationState.NOT_ASSESSED)),
         gm_mark=extra_fields.get("gm_mark", FieldObservation(state=ObservationState.NOT_ASSESSED)),
         dietary_origin_mark=extra_fields.get("dietary_origin_mark", FieldObservation(state=ObservationState.NOT_ASSESSED)),
-        ecommerce_country_of_origin_filter=extra_fields.get("ecommerce_country_of_origin_filter", FieldObservation(state=ObservationState.NOT_ASSESSED)),
         context=package_context,
     )
     return package
@@ -1096,6 +1277,16 @@ def _build_extraction_prompt() -> str:
     - manufacturer_details and consumer_care_details must include the complete
       visible declaration, including address, email, phone, and references to
       an address stated above where printed.
+    - If a responsible entity name is printed in one declaration and the same
+      legal entity name is repeated next to a readable postal address in a
+      consumer-services/contact declaration, include that linked name/address
+      evidence in manufacturer_details. Do not mark the address absent merely
+      because the package places it in the contact block.
+    - For every visible field, include source_image_index as the zero-based
+      index of the supplied image where that declaration is visible. Omit it
+      when the source cannot be established precisely; never guess. Preserve
+      bounding_box only when the model can identify one from the supplied
+      image, and never fabricate coordinates.
     - Return valid JSON only. No markdown fences.
     - Include image_coverage and context sections for downstream legal validation.
     - Confidence should be between 0 and 1.
@@ -1118,12 +1309,11 @@ def _build_extraction_prompt() -> str:
         "contains_multiple_products": false,
         "is_genetically_modified_food": false,
         "requires_vegetarian_origin_mark": false,
-        "is_ecommerce_entity_offering_imported_product": false,
         "inspected_relevant_label_surfaces": true
       },
       "fields": {
-        "generic_name": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": "...", "confidence": 0.93, "evidence": "Visible text excerpt", "bounding_box": {"x": 10, "y": 20, "w": 60, "h": 15}},
-        "manufacturer_details": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": "...", "confidence": 0.9, "evidence": "...", "bounding_box": {"x": 0, "y": 0, "w": 0, "h": 0}},
+        "generic_name": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": "...", "confidence": 0.93, "evidence": "Visible text excerpt", "source_image_index": 0, "bounding_box": {"x": 10, "y": 20, "w": 60, "h": 15}},
+        "manufacturer_details": {"status": "VISIBLE|NOT_VISIBLE|UNREADABLE|CONFIRMED_ABSENT|NOT_ASSESSED", "value": "...", "confidence": 0.9, "evidence": "...", "source_image_index": 1, "bounding_box": {"x": 0, "y": 0, "w": 0, "h": 0}},
         "packer_details": {"status": "NOT_VISIBLE", "value": null, "confidence": 0.0, "evidence": "Not visible on the provided images."},
         "importer_details": {"status": "NOT_VISIBLE", "value": null, "confidence": 0.0, "evidence": "Not visible on the provided images."},
         "country_of_origin": {"status": "NOT_VISIBLE", "value": null, "confidence": 0.0, "evidence": "Not visible on the provided images."},
@@ -1186,16 +1376,40 @@ def _is_gemini_transient_error(error: Exception) -> bool:
     )
 
 
+def _gemini_error_category(error: Exception) -> str:
+    """Classify provider failures without exposing credential contents."""
+    error_text = str(error).lower()
+    status_code = _gemini_error_code(error)
+    if status_code == 429:
+        if any(marker in error_text for marker in ("resource_exhausted", "quota", "quota exceeded", "quota exhausted")):
+            return "quota_exhausted"
+        return "rate_limited"
+    if status_code in {401} or any(marker in error_text for marker in ("unauthenticated", "invalid api key", "api key not valid", "access_token_type_unsupported")):
+        return "authentication"
+    if status_code == 403 or any(marker in error_text for marker in ("permission denied", "permission_denied", "forbidden", "project is not permitted")):
+        return "permission"
+    if status_code == 404 or any(marker in error_text for marker in ("model not found", "not found: model", "does not exist")):
+        return "model_unavailable"
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)) or any(marker in error_text for marker in ("timed out", "timeout")):
+        return "timeout"
+    if _is_gemini_transient_error(error):
+        return "transient"
+    return "unknown"
+
+
 def _configured_gemini_credentials() -> list[tuple[str, str]]:
     primary_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-    if not primary_key:
-        return []
     primary_model = GEMINI_MODEL.strip()
     fallback_model = GEMINI_FALLBACK_MODEL
-    configured_keys = [key.strip() for key in (os.getenv("GEMINI_API_KEYS") or "").split(",") if key.strip()]
+    configured_keys = [key.strip() for key in re.split(r"[,;\s]+", os.getenv("GEMINI_API_KEYS") or "") if key.strip()]
     fallback_key = (os.getenv("GEMINI_API_KEY_FALLBACK") or "").strip()
+    additional_keys = [key for key in [fallback_key, *configured_keys] if key]
+    if not primary_key and additional_keys:
+        primary_key = additional_keys.pop(0)
+    if not primary_key:
+        return []
     credentials = [(primary_key, primary_model)]
-    for key in [fallback_key, *configured_keys]:
+    for key in additional_keys:
         if key and key not in {item[0] for item in credentials}:
             credentials.append((key, fallback_model or primary_model))
     if fallback_model and fallback_model != primary_model and len(credentials) == 1:
@@ -1217,9 +1431,11 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
     response = None
     last_error: Exception | None = None
     total_started = time.perf_counter()
-    attempts = credentials[:2]
+    # Use every distinct configured credential, but only after the preceding
+    # request fails. A successful primary request still exits immediately.
+    attempts = credentials
     for credential_index, (api_key, model) in enumerate(attempts):
-        label = "Fallback" if credential_index > 0 else "Primary"
+        label = "Primary" if credential_index == 0 else f"Fallback {credential_index + 1}"
         remaining_seconds = GEMINI_TOTAL_TIMEOUT_SECONDS - (time.perf_counter() - total_started)
         if remaining_seconds <= 0:
             break
@@ -1246,58 +1462,60 @@ async def _call_gemini(images: list[tuple[str, str, bytes]]) -> dict[str, Any]:
                 timeout=request_timeout,
             )
             elapsed = time.perf_counter() - request_started
-            if label == "Fallback":
-                logger.info("[GEMINI] Fallback completed in %.2fs", elapsed)
-                logger.info("[GEMINI] Fallback success")
+            if credential_index > 0:
+                logger.info("[GEMINI] %s completed in %.2fs", label, elapsed)
+                logger.info("[GEMINI] %s success", label)
             else:
                 logger.info("[GEMINI] Primary response: %.2fs", elapsed)
             break
         except Exception as error:
             last_error = error
-            error_text = str(error)
             status_code = _gemini_error_code(error)
             elapsed = time.perf_counter() - request_started
+            category = _gemini_error_category(error)
             logger.error(
-                "[GEMINI] %s failed: status=%s type=%s error=%s",
+                "[GEMINI] %s failed: category=%s status=%s type=%s error=%s",
                 label,
+                category,
                 status_code or "unknown",
                 type(error).__name__,
                 error,
             )
-            is_auth_error = (
-                status_code == 401
-                or "UNAUTHENTICATED" in error_text
-                or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in error_text
-            )
-            is_quota_error = status_code == 429 or "RESOURCE_EXHAUSTED" in error_text or "quota" in error_text.lower()
+            next_credential = credentials[credential_index + 1] if credential_index + 1 < len(attempts) else None
+            same_credential_and_model = bool(next_credential and next_credential == (api_key, model))
 
-            if is_auth_error:
+            if category == "authentication":
+                if next_credential and not same_credential_and_model and next_credential[0] != api_key:
+                    logger.warning("[GEMINI] %s authentication failed; trying configured fallback credential %d.", label, credential_index + 2)
+                    continue
                 raise HTTPException(
                     status_code=502,
-                    detail=(
-                        "Gemini rejected GEMINI_API_KEY. Create a fresh Gemini API key in Google AI Studio, "
-                        "replace GEMINI_API_KEY in the backend .env file, and restart Uvicorn."
-                    ),
+                    detail="Gemini authentication failed for the configured credential. Replace the invalid API key and restart the backend.",
                 ) from error
-            if is_quota_error:
-                if credential_index + 1 < len(attempts):
-                    logger.warning("[GEMINI] %s failed after %.2fs", label, elapsed)
-                    logger.info("[GEMINI] Switching to fallback model: %s", credentials[credential_index + 1][1])
+            if category in {"quota_exhausted", "rate_limited"}:
+                if next_credential and not same_credential_and_model:
+                    logger.warning("[GEMINI] %s failed after %.2fs; trying configured fallback credential %d.", label, elapsed, credential_index + 2)
                     continue
                 raise HTTPException(
                     status_code=429,
                     detail=(
-                        "Gemini request quota is exhausted for the configured models. "
-                        "Wait for the quota to reset, enable billing, or set GEMINI_API_KEY_FALLBACK "
-                        "or GEMINI_API_KEYS with a key from another Google project."
+                        "Gemini API quota is currently unavailable for the configured credentials. "
+                        "Switch to a credential from another Google project or wait for the quota to reset."
+                        if category == "quota_exhausted"
+                        else "Gemini is temporarily rate-limited. Please try again shortly or use another configured credential."
                     ),
                 ) from error
-            if _is_gemini_transient_error(error):
+            if category in {"transient", "timeout"}:
                 logger.warning("[GEMINI] %s failed/timeout after %.2fs", label, elapsed)
-                if credential_index + 1 < len(attempts):
-                    logger.info("[GEMINI] Switching to fallback model: %s", credentials[credential_index + 1][1])
+                if next_credential and not same_credential_and_model:
+                    next_model = credentials[credential_index + 1][1]
+                    logger.info("[GEMINI] Switching to fallback credential %d with model: %s", credential_index + 2, next_model)
                     continue
                 break
+            if category == "permission":
+                raise HTTPException(status_code=502, detail="Gemini rejected the configured project permission. Check the Google project, API enablement, and API key restrictions.") from error
+            if category == "model_unavailable":
+                raise HTTPException(status_code=502, detail=f"The configured Gemini model is unavailable: {model}.") from error
             raise HTTPException(
                 status_code=502,
                 detail="Gemini image analysis is temporarily unavailable. Check the backend log and try again.",
@@ -1340,14 +1558,17 @@ def _persist_scan_artifacts(
     try:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
         upload_started = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=min(4, len(loaded))) as executor:
-            local_and_remote = list(executor.map(
-                lambda item: (
-                    item,
-                    _upload_to_supabase_storage(user["id"], scan_id, item[0], item[1], item[2]),
-                ),
-                loaded,
-            ))
+        # The Supabase Python client is not safe to share across worker
+        # threads on Windows. Upload sequentially in this already-background
+        # task so the user response remains unchanged and every image gets a
+        # reliable scan_images record.
+        local_and_remote = [
+            (
+                item,
+                _upload_to_supabase_storage(user["id"], scan_id, item[0], item[1], item[2]),
+            )
+            for item in loaded
+        ]
         for index, ((filename, _mime_type, data), storage_ref) in enumerate(local_and_remote, 1):
             image_filename = f"{uuid.uuid4().hex}{Path(filename).suffix.lower() or '.jpg'}"
             (STORAGE_DIR / image_filename).write_bytes(data)
@@ -1369,6 +1590,12 @@ def _persist_scan_artifacts(
                 )
             connection.commit()
         logger.info("[SCAN] Background DB: %.2fs", time.perf_counter() - db_started)
+
+        # Organizations receive a certificate only through the separate,
+        # user-triggered certificate endpoint. Preserve the existing officer
+        # report path without generating an official report for organizations.
+        if user.get("role") != "officer":
+            return
 
         report_id = new_id("report")
         pdf_path = STORAGE_DIR / "reports" / f"{report_id}.pdf"
@@ -1399,6 +1626,15 @@ def _persist_scan_artifacts(
 
 @app.on_event("startup")
 async def startup() -> None:
+    configured_credentials = _configured_gemini_credentials()
+    logger.info(
+        "[GEMINI] Configuration: primary_model=%s fallback_model=%s credentials=%d primary_configured=%s fallback_configured=%s",
+        GEMINI_MODEL or "(unset)",
+        GEMINI_FALLBACK_MODEL or "(unset)",
+        len(configured_credentials),
+        bool(configured_credentials),
+        len(configured_credentials) > 1,
+    )
     try:
         init_db()
     except Exception as error:  # The API can still start and expose a useful health/error response.
@@ -1562,13 +1798,41 @@ async def admin_filters(authorization: str | None = Header(default=None)) -> dic
     return {"states": states, "districts": districts, "categories": categories}
 
 
+@app.get("/api/admin/officers")
+async def admin_officers(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    """Return persisted officer location summaries for the admin overview.
+
+    Complaint and violation access remains jurisdiction-scoped. This small
+    directory intentionally reads the current officer profile directly so an
+    edited state/location is not hidden by stale seed data or admin defaults.
+    """
+    _admin_or_403(authorization)
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT u.id, u.officer_id, u.name, u.email, u.location, u.state, u.district FROM users u WHERE u.role = 'officer' ORDER BY u.name",
+            )
+            return [
+                {
+                    "id": row["id"],
+                    "officerId": row.get("officer_id"),
+                    "name": row.get("name") or "Officer",
+                    "email": row.get("email") or "",
+                    "location": row.get("location") or "",
+                    "state": row.get("state") or "",
+                    "district": row.get("district") or "",
+                }
+                for row in cursor.fetchall()
+            ]
+
+
 @app.get("/api/admin/violations")
 async def admin_violations(state: str | None = Query(default=None), district: str | None = Query(default=None), authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
     admin = _admin_or_403(authorization)
     conditions, params = _complaint_scope(admin, requested_state=state, requested_district=district, alias="u")
     with connect() as connection:
         with connection.cursor() as cursor:
-            cursor.execute(f"SELECT COALESCE(u.state, 'Not provided') AS state, COALESCE(u.district, 'Not provided') AS district, cr.check_name AS rule_id, COUNT(*) AS count FROM compliance_results cr JOIN scans s ON s.scan_id = cr.scan_id JOIN users u ON u.id = s.user_id WHERE cr.status = 'VIOLATION' AND {conditions} GROUP BY u.state, u.district, cr.check_name ORDER BY count DESC", params)
+            cursor.execute(f"SELECT COALESCE(u.state, 'Not provided') AS state, COALESCE(u.district, 'Not provided') AS district, cr.check_name AS rule_id, COUNT(*) AS count FROM compliance_results cr JOIN scans s ON s.scan_id = cr.scan_id JOIN users u ON u.id = s.user_id WHERE cr.status = 'VIOLATION' AND cr.check_name <> 'R6_10A' AND {conditions} GROUP BY u.state, u.district, cr.check_name ORDER BY count DESC", params)
             return [dict(row) for row in cursor.fetchall()]
 
 
@@ -1608,8 +1872,8 @@ async def list_complaints(
 @app.post("/api/complaints")
 async def create_complaint(request: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
     user = _user_or_401(authorization)
-    if user["role"] != "organization":
-        raise HTTPException(status_code=403, detail="Only organizations can submit complaints.")
+    if user["role"] == "organization":
+        raise HTTPException(status_code=403, detail="Organizations cannot raise complaints from this workspace.")
     complaint_id = new_id("complaint")
     payload = request or {}
     product_name = str(payload.get("product") or payload.get("product_name") or "Unspecified product")
@@ -1739,7 +2003,9 @@ async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile
                 "value": outcome.evidence or "Evidence unavailable for this assessment",
                 "reference": outcome.legal_reference,
                 "explanation": outcome.explanation,
-                "sourceImage": None,
+                "sourceImage": outcome.source_image,
+                "sourceImageRef": outcome.source_image_ref,
+                "boundingBox": outcome.bounding_box,
                 "confidence": None,
             }
         )
@@ -1751,12 +2017,12 @@ async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile
             with connection.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO scans (scan_id, user_id, organization_id, product_name, overall_status, image_ref, image_metadata, extracted_data, compliance_score) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)",
-                    (scan_id, user["id"], user.get("organization_id"), package.generic_name.value or "Product name unavailable", result.overall_status.value, "", json.dumps({"image_count": len(loaded)}), json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark", "ecommerce_country_of_origin_filter")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {})}), compliance_score),
+                    (scan_id, user["id"], user.get("organization_id"), package.generic_name.value or "Product name unavailable", result.overall_status.value, "", json.dumps({"image_count": len(loaded)}), json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {})}), compliance_score),
                 )
                 for outcome in result.outcomes:
                     cursor.execute(
-                        "INSERT INTO compliance_results (scan_id, check_name, status, extracted_value, applicable_requirement, explanation, evidence) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (scan_id, outcome.rule_id, outcome.status.value, outcome.evidence or None, outcome.legal_reference, outcome.explanation, outcome.evidence or None),
+                        "INSERT INTO compliance_results (scan_id, check_name, status, extracted_value, applicable_requirement, explanation, evidence, source_image) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (scan_id, outcome.rule_id, outcome.status.value, outcome.evidence or None, outcome.legal_reference, outcome.explanation, outcome.evidence or None, outcome.source_image),
                     )
             connection.commit()
     except Exception:
@@ -1980,7 +2246,7 @@ async def list_reports(
                     JOIN scans s ON s.scan_id = r.scan_id
                     JOIN users u ON u.id = r.generated_by
                     LEFT JOIN users scan_user ON scan_user.id = s.user_id
-                    LEFT JOIN compliance_results cr ON cr.scan_id = s.scan_id
+                    LEFT JOIN compliance_results cr ON cr.scan_id = s.scan_id AND cr.check_name <> 'R6_10A'
                     WHERE {scope}
                     GROUP BY r.report_id, r.scan_id, r.generated_at, r.metadata, s.product_name, s.overall_status,
                              s.scanned_at, s.compliance_score, u.name, scan_user.location
@@ -2035,6 +2301,163 @@ async def download_report(report_id: str, authorization: str | None = Header(def
         raise
     except Exception:
         raise HTTPException(status_code=503, detail="The PDF could not be downloaded.")
+
+
+def _certificate_row(certificate_id: str, user: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.*, s.product_name, s.user_id AS scan_user_id, s.organization_id AS scan_organization_id,
+                       s.scanned_at, s.extracted_data, s.compliance_score, s.overall_status AS scan_status
+                FROM reports r JOIN scans s ON s.scan_id = r.scan_id
+                WHERE r.report_id = %s AND r.metadata->>'document_type' = 'COMPLIANCE_CERTIFICATE'
+                """,
+                (certificate_id,),
+            )
+            row = cursor.fetchone()
+    if not row or user is None:
+        return row
+    if user.get("role") != "organization":
+        return None
+    if row.get("scan_user_id") != user.get("id") and row.get("scan_organization_id") != user.get("organization_id"):
+        return None
+    return row
+
+
+@app.get("/api/certificates/scan/{scan_id}")
+async def get_scan_certificate(scan_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _organization_or_403(authorization)
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT r.*, s.product_name, s.user_id AS scan_user_id, s.organization_id AS scan_organization_id,
+                       s.scanned_at, s.extracted_data, s.compliance_score, s.overall_status AS scan_status
+                FROM reports r JOIN scans s ON s.scan_id = r.scan_id
+                WHERE r.scan_id = %s AND r.metadata->>'document_type' = 'COMPLIANCE_CERTIFICATE'
+                  AND (s.user_id = %s OR s.organization_id = %s)
+                ORDER BY r.generated_at DESC LIMIT 1
+                """,
+                (scan_id, user["id"], user.get("organization_id")),
+            )
+            row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No compliance certificate has been generated for this scan.")
+    return _certificate_dto(row)
+
+
+@app.post("/api/certificates/{scan_id}")
+async def generate_certificate(scan_id: str, request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user = _organization_or_403(authorization)
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT s.*, u.location AS inspection_location
+                    FROM scans s JOIN users u ON u.id = s.user_id
+                    WHERE s.scan_id = %s AND (s.user_id = %s OR s.organization_id = %s)
+                    """,
+                    (scan_id, user["id"], user.get("organization_id")),
+                )
+                scan = cursor.fetchone()
+                if not scan:
+                    raise HTTPException(status_code=404, detail="Scan not found.")
+                checks = _result_rows(cursor, scan_id)
+                eligible, reason = _certificate_eligibility(scan, checks)
+                if not eligible:
+                    raise HTTPException(status_code=409, detail=f"Compliance certificate is not available: {reason}")
+
+                cursor.execute(
+                    """
+                    SELECT r.*, s.product_name, s.user_id AS scan_user_id, s.organization_id AS scan_organization_id,
+                           s.scanned_at, s.extracted_data, s.compliance_score, s.overall_status AS scan_status
+                    FROM reports r JOIN scans s ON s.scan_id = r.scan_id
+                    WHERE r.scan_id = %s AND r.metadata->>'document_type' = 'COMPLIANCE_CERTIFICATE'
+                    ORDER BY r.generated_at DESC LIMIT 1
+                    """,
+                    (scan_id,),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    return _certificate_dto(existing)
+
+                certificate_id = new_id("certificate")
+                generated_at = datetime.now(UTC)
+                verification_url = _certificate_verification_url(request, certificate_id)
+                applicable_checks = [item for item in checks if str(item.get("status") or "").upper() != "NOT_APPLICABLE"]
+                payload = {
+                    "certificate_id": certificate_id,
+                    "scan_id": scan_id,
+                    "scanned_at": scan.get("scanned_at"),
+                    "generated_at": generated_at,
+                    "product_name": scan.get("product_name"),
+                    "extracted_data": scan.get("extracted_data") or {},
+                    "compliance_score": int(scan.get("compliance_score") or _calculate_compliance_score(checks)),
+                    "summary": {
+                        "total": len(applicable_checks),
+                        "compliant": sum(1 for item in applicable_checks if item.get("status") == "COMPLIANT"),
+                        "violations": sum(1 for item in applicable_checks if item.get("status") == "VIOLATION"),
+                        "review": sum(1 for item in applicable_checks if item.get("status") in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED"}),
+                    },
+                    "verification_url": verification_url,
+                }
+                pdf_path = STORAGE_DIR / "reports" / f"{certificate_id}.pdf"
+                create_certificate_pdf(payload, pdf_path)
+                metadata = {
+                    "document_type": "COMPLIANCE_CERTIFICATE",
+                    "generator": "reportlab",
+                    "compliance_score": payload["compliance_score"],
+                    "verification_url": verification_url,
+                    "eligibility_reason": reason,
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO reports (report_id, scan_id, generated_by, organization_id, generated_at, pdf_path, status, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (certificate_id, scan_id, user["id"], scan.get("organization_id") or user.get("organization_id"), generated_at, str(pdf_path), "COMPLIANT", json.dumps(metadata)),
+                )
+                connection.commit()
+                return _certificate_dto({**scan, "report_id": certificate_id, "scan_id": scan_id, "generated_at": generated_at, "metadata": metadata, "compliance_score": payload["compliance_score"]})
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Certificate generation failed for scan %s", scan_id)
+        raise HTTPException(status_code=503, detail="The compliance certificate could not be generated or saved.")
+
+
+@app.get("/api/certificates/{certificate_id}/verify")
+async def verify_certificate(certificate_id: str) -> dict[str, Any]:
+    row = _certificate_row(certificate_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Certificate not found.")
+    metadata = row.get("metadata") or {}
+    score = row.get("compliance_score")
+    if score is None and isinstance(metadata, dict):
+        score = metadata.get("compliance_score", 0)
+    return {
+        "certificateId": row["report_id"],
+        "product": row.get("product_name") or "Product name unavailable",
+        "assessmentDate": iso_datetime(row.get("scanned_at")),
+        "score": int(score or 0),
+        "complianceStatus": "COMPLIANT",
+        "verificationStatus": "VALID",
+    }
+
+
+@app.get("/api/certificates/{certificate_id}/pdf")
+async def download_certificate(certificate_id: str, authorization: str | None = Header(default=None)):
+    user = _organization_or_403(authorization)
+    row = _certificate_row(certificate_id, user)
+    if not row:
+        raise HTTPException(status_code=404, detail="Certificate not found.")
+    from fastapi.responses import FileResponse
+    path = Path(row["pdf_path"]).resolve()
+    if not path.is_file() or STORAGE_DIR not in path.parents:
+        raise HTTPException(status_code=404, detail="The certificate PDF file is no longer available.")
+    return FileResponse(path, media_type="application/pdf", filename=f"{certificate_id}.pdf")
 
 
 if __name__ == "__main__":

@@ -129,6 +129,30 @@ The application is structured around three main operational roles:
    npm run dev
    ```
 
+### Vercel deployment
+
+Vercel hosts the React frontend only. The FastAPI backend must also be running
+at a publicly reachable HTTPS address; a URL such as `127.0.0.1`, `localhost`,
+or a local port cannot be used by deployed visitors.
+
+In the Vercel project settings, add this environment variable for Preview and
+Production, using the actual public backend URL:
+
+```text
+VITE_API_BASE_URL=https://your-public-backend.example.com
+```
+
+Then redeploy the frontend. On the backend host, set `FRONTEND_ORIGINS` to the
+Vercel origin (and any custom frontend origin), for example:
+
+```text
+FRONTEND_ORIGINS=https://legal-metrology-compliance-2bsw54eh.vercel.app
+```
+
+Do not put `GEMINI_API_KEY`, `DATABASE_URL`, `SUPABASE_SECRET_KEY`,
+`TOKEN_SECRET`, or any other backend secret in a `VITE_*` variable. Those
+values belong only in the backend deployment environment.
+
 ### Development Demo Accounts
 
 The database initializer creates these accounts when they do not already exist:

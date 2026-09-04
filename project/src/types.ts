@@ -126,7 +126,22 @@ export interface Scan {
   extractedData?: Record<string, unknown>;
   checks?: Array<{ id: string | number; label: string; status: string; value: string; reference: string; explanation: string; evidence?: string; confidence?: number | null }>;
   complianceScore?: number;
+  certificateEligible?: boolean;
+  certificateEligibilityReason?: string;
   officerReview?: Partial<OfficerReview>;
+}
+
+export interface ComplianceCertificate {
+  id: string;
+  certificateId: string;
+  scanId: string;
+  productName: string;
+  generatedAt: string;
+  assessmentDate: string;
+  complianceScore: number;
+  status: 'compliant';
+  pdfUrl?: string;
+  verificationUrl?: string | null;
 }
 
 export type ComplaintStatus = 'new' | 'viewed' | 'in-progress' | 'review' | 'investigating' | 'action-taken' | 'resolved' | 'closed';

@@ -1,7 +1,7 @@
 import unittest
 
 from database import SCHEMA_SQL
-from server import _automatic_violation_complaint_data, _complaint_scope, _normalize_complaint_status
+from server import _automatic_violation_complaint_data, _certificate_eligibility, _complaint_scope, _normalize_complaint_status
 
 
 class RoleAndComplaintSchemaTests(unittest.TestCase):
@@ -48,6 +48,14 @@ class RoleAndComplaintSchemaTests(unittest.TestCase):
         self.assertEqual(_normalize_complaint_status("viewed"), "VIEWED")
         self.assertEqual(_normalize_complaint_status("in-progress"), "IN_PROGRESS")
         self.assertEqual(_normalize_complaint_status("review"), "IN_PROGRESS")
+
+    def test_certificate_requires_compliant_verified_findings_and_score(self) -> None:
+        scan = {"overall_status": "COMPLIANT", "compliance_score": 96}
+        self.assertEqual(_certificate_eligibility(scan, [{"status": "COMPLIANT"}])[0], True)
+        self.assertEqual(_certificate_eligibility(scan, [{"status": "NOT_APPLICABLE"}, {"status": "COMPLIANT"}])[0], True)
+        self.assertEqual(_certificate_eligibility({**scan, "compliance_score": 89}, [{"status": "COMPLIANT"}])[0], False)
+        self.assertEqual(_certificate_eligibility(scan, [{"status": "UNABLE_TO_VERIFY"}])[0], False)
+        self.assertEqual(_certificate_eligibility(scan, [{"status": "VIOLATION"}])[0], False)
 
 
 if __name__ == "__main__":

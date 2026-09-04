@@ -46,7 +46,9 @@ export function Sidebar() {
 
   const items = role === 'admin'
     ? nav.filter((n) => ['dashboard', 'complaints', 'analytics', 'violation-map', 'profile', 'settings'].includes(n.key))
-    : nav.filter((n) => ['dashboard', 'scan', 'history', 'complaints', 'reports', 'profile', 'settings'].includes(n.key));
+    : nav.filter((n) => (role === 'organization'
+      ? ['dashboard', 'scan', 'history', 'profile', 'settings'].includes(n.key)
+      : ['dashboard', 'scan', 'history', 'complaints', 'reports', 'profile', 'settings'].includes(n.key)));
 
   return (
     <>

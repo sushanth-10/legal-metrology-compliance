@@ -1,6 +1,7 @@
 import unittest
 
 from compliance_engine import ComplianceEngine, ExtractedPackage, FieldObservation, ObservationState, PackageContext, QuantityBasis, Status
+from compliance_engine.rules import responsible_entity_check
 
 
 def present(value: str) -> FieldObservation:
@@ -8,6 +9,89 @@ def present(value: str) -> FieldObservation:
 
 
 class ComplianceEngineTests(unittest.TestCase):
+    def test_mrp_accepts_equivalent_currency_and_tax_inclusive_formatting(self) -> None:
+        for declaration in (
+            "~MRP Rs. 20/- (INCL. OF ALL TAXES)",
+            "MRP Rs 20/- (INCL. OF ALL TAXES)",
+            "MRP R S . 20/- (INCL. OF ALL TAXES)",
+            "MRP Rs. 20/- (INCL. OF ALL TAXES)",
+            "MRP ₹20/- (INCL OF ALL TAXES)",
+            "MRP R.S. 20.00 (INCLUSIVE OF ALL TAXES)",
+            "MRP R S 20,00 (INCL. OF ALL TAXES)",
+        ):
+            package = ExtractedPackage(
+                mrp=present(declaration),
+                context=PackageContext(inspected_relevant_label_surfaces=True),
+            )
+            outcome = next(item for item in ComplianceEngine().evaluate(package).outcomes if item.rule_id == "R6_1_E")
+            self.assertEqual(outcome.status, Status.COMPLIANT, declaration)
+
+    def test_mrp_still_requires_label_currency_and_inclusive_tax_wording(self) -> None:
+        for declaration in (
+            "MRP Rs. 20/-",
+            "MRP 20/- (INCL. OF ALL TAXES)",
+            "USP Rs. 0.64/- PER g",
+        ):
+            package = ExtractedPackage(
+                mrp=present(declaration),
+                context=PackageContext(inspected_relevant_label_surfaces=True),
+            )
+            outcome = next(item for item in ComplianceEngine().evaluate(package).outcomes if item.rule_id == "R6_1_E")
+            self.assertEqual(outcome.status, Status.VIOLATION, declaration)
+
+    def test_ecommerce_country_origin_filter_is_not_a_compliance_finding(self) -> None:
+        package = ExtractedPackage(
+            context=PackageContext(
+                is_imported=True,
+                inspected_relevant_label_surfaces=True,
+            ),
+        )
+        rule_ids = {item.rule_id for item in ComplianceEngine().evaluate(package).outcomes}
+        self.assertNotIn("R6_10A", rule_ids)
+
+    def test_responsible_entity_retains_observation_provenance(self) -> None:
+        package = ExtractedPackage(
+            manufacturer=FieldObservation(
+                ObservationState.PRESENT,
+                "PepsiCo India Holdings Pvt. Ltd., Noida 201301",
+                evidence="PepsiCo India Holdings Pvt. Ltd., Noida 201301",
+                source_image=1,
+            ),
+            context=PackageContext(inspected_relevant_label_surfaces=True),
+        )
+        outcome = responsible_entity_check(package)
+        self.assertEqual(outcome.status, Status.COMPLIANT)
+        self.assertEqual(outcome.source_image, 1)
+        self.assertIn("PepsiCo", outcome.evidence)
+
+    def test_responsible_entity_can_link_repeated_name_to_contact_address(self) -> None:
+        package = ExtractedPackage(
+            manufacturer=FieldObservation(
+                ObservationState.PRESENT,
+                "Mfg. & Mkt. by: PepsiCo India Holdings Pvt. Ltd.",
+                source_image=1,
+            ),
+            consumer_care=FieldObservation(
+                ObservationState.PRESENT,
+                "The Consumer Services Manager, PepsiCo India Holdings Pvt. Ltd., P.O. Box 27, Gurugram - 122002, Haryana, India.",
+                source_image=1,
+            ),
+            context=PackageContext(inspected_relevant_label_surfaces=True),
+        )
+        outcome = responsible_entity_check(package)
+        self.assertEqual(outcome.status, Status.COMPLIANT)
+        self.assertEqual(outcome.source_image, 1)
+        self.assertIn("122002", outcome.evidence)
+
+    def test_unrelated_contact_address_does_not_complete_entity_declaration(self) -> None:
+        package = ExtractedPackage(
+            manufacturer=present("Mfg. & Mkt. by: PepsiCo India Holdings Pvt. Ltd."),
+            consumer_care=present("Consumer care: Acme Services, Mumbai 400001; 1800 000 000"),
+            context=PackageContext(inspected_relevant_label_surfaces=True),
+        )
+        outcome = responsible_entity_check(package)
+        self.assertEqual(outcome.status, Status.UNABLE_TO_VERIFY)
+
     def test_lays_style_visible_evidence_is_not_misclassified(self) -> None:
         package = ExtractedPackage(
             generic_name=present("POTATO CHIPS"),
@@ -30,7 +114,6 @@ class ComplianceEngineTests(unittest.TestCase):
                 contains_multiple_products=False,
                 is_genetically_modified_food=False,
                 requires_vegetarian_origin_mark=True,
-                is_ecommerce_entity_offering_imported_product=False,
                 inspected_relevant_label_surfaces=True,
             ),
         )
@@ -59,7 +142,6 @@ class ComplianceEngineTests(unittest.TestCase):
                 contains_multiple_products=False,
                 is_genetically_modified_food=False,
                 requires_vegetarian_origin_mark=False,
-                is_ecommerce_entity_offering_imported_product=False,
                 inspected_relevant_label_surfaces=True,
             ),
         )

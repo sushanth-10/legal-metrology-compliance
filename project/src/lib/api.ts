@@ -1,4 +1,32 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
+const configuredApiBase = String(import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '');
+const developmentApiBase = 'http://127.0.0.1:8001';
+
+function configuredBaseUrl(): string {
+  const baseUrl = configuredApiBase || (import.meta.env.DEV ? developmentApiBase : '');
+
+  if (!baseUrl) {
+    throw new Error(
+      'The NIRIKSHA backend URL is not configured for this deployment. Set VITE_API_BASE_URL to the public HTTPS backend URL in Vercel, then redeploy.'
+    );
+  }
+
+  if (import.meta.env.PROD) {
+    let hostname = '';
+    try {
+      hostname = new URL(baseUrl).hostname.toLowerCase();
+    } catch {
+      throw new Error('VITE_API_BASE_URL must be a valid backend URL.');
+    }
+
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+      throw new Error(
+        'VITE_API_BASE_URL points to this computer. Configure the public HTTPS backend URL in Vercel and redeploy.'
+      );
+    }
+  }
+
+  return baseUrl;
+}
 
 export function sessionToken(): string | null {
   try {
@@ -13,7 +41,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   const headers = new Headers(init.headers);
   const token = sessionToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  return fetch(`${API_BASE}${path}`, { ...init, headers });
+  return fetch(`${configuredBaseUrl()}${path}`, { ...init, headers });
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -32,9 +60,9 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
 }
 
 export function apiBaseUrl(): string {
-  return API_BASE;
+  return configuredBaseUrl();
 }
 
 export function absoluteApiUrl(path: string): string {
-  return path.startsWith('http') ? path : `${API_BASE}${path}`;
+  return path.startsWith('http') ? path : `${configuredBaseUrl()}${path}`;
 }

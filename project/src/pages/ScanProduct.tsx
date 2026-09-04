@@ -3,7 +3,8 @@ import { AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronDown, ChevronUp, C
 import { InfoNote, PageHeader } from '@/components/ui';
 import { useApp } from '@/store';
 import { apiBaseUrl, apiFetch, apiJson } from '@/lib/api';
-import type { GeneratedReport, Scan } from '@/types';
+import { downloadCertificateAsPdf } from '@/lib/reporting';
+import type { ComplianceCertificate, GeneratedReport, Scan } from '@/types';
 
 type Mode = 'report' | 'advanced';
 type Stage = 'upload' | 'processing' | 'report' | 'advanced';
@@ -44,7 +45,7 @@ function normalizeScan(scan: Scan): Scan {
   };
 }
 
-type Check = { id: string; label: string; status: Status; value: string; reference: string; explanation: string; sourceImage: number | null };
+type Check = { id: string; label: string; status: Status; value: string; reference: string; explanation: string; sourceImage?: number | null; sourceImageRef?: string | null };
 
 const steps = ['Images uploaded', 'Image quality checked', 'Reading product label', 'Extracting product information', 'Checking mandatory declarations', 'Applying Legal Metrology rules', 'Generating compliance report'];
 
@@ -84,7 +85,7 @@ function Processing({ mode, results, back }: { mode: Mode; results: () => void; 
 
 function CheckRow({ check, images }: { check: Check; images: Array<ImageItem | null> }) {
   const [open, setOpen] = useState(false); const [issue, setIssue] = useState<'missing' | 'no-label' | 'other' | null>(null); const [note, setNote] = useState(''); const [saved, setSaved] = useState(false);
-  const source = check.sourceImage === null ? null : images[check.sourceImage];
+  const source = typeof check.sourceImage === 'number' && check.sourceImage >= 0 ? images[check.sourceImage] : null;
   return <article className="border border-ink-200 rounded-xl overflow-hidden"><button onClick={() => setOpen(!open)} className="w-full text-left p-4 flex items-start gap-3 hover:bg-ink-50"><Badge status={check.status} /><div className="flex-1 min-w-0"><p className="font-semibold text-ink-900">{check.label}</p><p className="text-sm text-ink-500 mt-0.5 truncate">{check.value}</p></div>{open ? <ChevronUp className="w-4 h-4 text-ink-500 mt-1" /> : <ChevronDown className="w-4 h-4 text-ink-500 mt-1" />}</button>{open && <div className="border-t border-ink-100 p-4 bg-ink-50/50 grid md:grid-cols-[1fr_220px] gap-4"><div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Applicable requirement</p><p className="text-sm text-ink-700 mt-1">{check.reference}</p><p className="text-xs font-semibold uppercase tracking-wide text-ink-500 mt-4">Explanation</p><p className="text-sm text-ink-700 mt-1 leading-6">{check.explanation}</p>{check.id === 'mrp' && check.status === 'UNABLE_TO_VERIFY' && <div className="mt-4 rounded-xl border border-warning-200 bg-warning-50 p-3"><p className="text-sm font-semibold text-warning-800">Tell us what you observed</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => { setIssue('missing'); setSaved(false); }} className="btn-secondary py-2">MRP appears to be missing</button><button onClick={() => { setIssue('no-label'); setSaved(false); }} className="btn-secondary py-2">No label/declaration visible</button><button onClick={() => { setIssue('other'); setSaved(false); }} className="btn-secondary py-2">Other issue</button></div>{issue === 'other' && <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} className="input mt-3 resize-y" placeholder="Describe the issue for future review…" />}{issue && <button disabled={issue === 'other' && !note.trim()} onClick={() => setSaved(true)} className="btn-primary mt-3 py-2">Continue</button>}{saved && <p className="text-xs text-success-700 font-medium mt-3">Observation recorded for future review. Status is unchanged.</p>}</div>}</div><div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500 mb-2">Evidence / source</p>{source ? <img src={source.url} alt={'Evidence for ' + check.label} className="w-full aspect-[4/3] object-cover rounded-lg border border-ink-200" /> : <div className="aspect-[4/3] rounded-lg border border-dashed border-ink-300 bg-white grid place-items-center p-3 text-center text-xs text-ink-500">No source image established</div>}</div></div>}</article>;
 }
 
@@ -107,20 +108,34 @@ function PersistedReportActions({ result }: { result: ScanApiResponse | null }) 
   const { role, addReport, setPage, showToast } = useApp();
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedReport, setGeneratedReport] = useState<GeneratedReport | null>(null);
+  const [certificate, setCertificate] = useState<ComplianceCertificate | null>(null);
   if (!['organization', 'officer'].includes(role) || !result?.scan) return null;
+  const isOrganization = role === 'organization';
   const generate = async () => {
     setIsGenerating(true);
     try {
-      const report = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(result.scan!.id)}`, { method: 'POST' });
-      addReport(report);
-      setGeneratedReport(report);
-      showToast('success', 'Official PDF report generated and saved.');
+      if (isOrganization) {
+        const created = await apiJson<ComplianceCertificate>(`/api/certificates/${encodeURIComponent(result.scan!.id)}`, { method: 'POST' });
+        setCertificate(created);
+        showToast('success', 'Compliance certificate generated and saved.');
+      } else {
+        const report = await apiJson<GeneratedReport>(`/api/reports/${encodeURIComponent(result.scan!.id)}`, { method: 'POST' });
+        addReport(report);
+        setGeneratedReport(report);
+        showToast('success', 'Official PDF report generated and saved.');
+      }
     } catch (error) {
       showToast('error', error instanceof Error ? error.message : 'Unable to generate the PDF report.');
     } finally {
       setIsGenerating(false);
     }
   };
+  if (isOrganization) {
+    if (!result.scan.certificateEligible) {
+      return <div className="max-w-6xl mx-auto mt-6 card p-5 text-sm text-warning-800 bg-warning-50 border border-warning-200">Compliance certificate unavailable: {result.scan.certificateEligibilityReason || 'this scan does not meet all eligibility requirements.'}</div>;
+    }
+    return <div className="max-w-6xl mx-auto mt-6 card p-5 flex flex-col sm:flex-row sm:items-center gap-3"><div className="flex-1"><p className="font-semibold text-ink-900">Compliance assessment certificate</p><p className="text-sm text-ink-500 mt-1">Generate a certificate from this persisted scan after the assessment is complete.</p></div>{certificate ? <button onClick={() => void downloadCertificateAsPdf(certificate)} className="btn-secondary py-2.5">Download Certificate</button> : <button onClick={() => void generate()} disabled={isGenerating} className="btn-primary py-2.5">{isGenerating ? 'Generating…' : 'Generate Compliance Certificate'}</button>}</div>;
+  }
   return <div className="max-w-6xl mx-auto mt-6 card p-5 flex flex-col sm:flex-row sm:items-center gap-3"><div className="flex-1"><p className="font-semibold text-ink-900">Official compliance report</p><p className="text-sm text-ink-500 mt-1">Generate a PDF from this persisted scan and its actual rule results.</p></div><button onClick={() => void generate()} disabled={isGenerating} className="btn-primary py-2.5">{isGenerating ? 'Generating…' : generatedReport ? 'Generate Updated Report' : 'Generate Report'}</button>{generatedReport && <button onClick={() => setPage('reports')} className="btn-secondary py-2.5">View Report</button>}</div>;
 }
 

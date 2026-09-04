@@ -360,6 +360,7 @@ def init_db() -> None:
             _add_column_if_missing(cursor, 'scans', 'organization_id', 'ALTER TABLE scans ADD COLUMN IF NOT EXISTS organization_id TEXT')
             _add_column_if_missing(cursor, 'reports', 'organization_id', 'ALTER TABLE reports ADD COLUMN IF NOT EXISTS organization_id TEXT')
             _add_column_if_missing(cursor, 'scans', 'compliance_score', 'ALTER TABLE scans ADD COLUMN IF NOT EXISTS compliance_score INTEGER NOT NULL DEFAULT 0')
+            _add_column_if_missing(cursor, 'compliance_results', 'source_image', 'ALTER TABLE compliance_results ADD COLUMN IF NOT EXISTS source_image INTEGER')
             _add_column_if_missing(cursor, 'organizations', 'organization_type', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS organization_type TEXT')
             _add_column_if_missing(cursor, 'organizations', 'official_mobile', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS official_mobile TEXT')
             _add_column_if_missing(cursor, 'organizations', 'registered_address', 'ALTER TABLE organizations ADD COLUMN IF NOT EXISTS registered_address TEXT')
@@ -518,5 +519,6 @@ def json_value(value: Any) -> Any:
 
 def iso_datetime(value: Any) -> str:
     if isinstance(value, datetime):
-        return value.isoformat()
+        normalized = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return normalized.astimezone(UTC).isoformat().replace("+00:00", "Z")
     return str(value)

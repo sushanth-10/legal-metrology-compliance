@@ -43,8 +43,8 @@ official gazette/Department of Consumer Affairs material before enforcement.
 
 - Rule 6(1)(a), (aa), (b), (c), (d), (da), and (e), including imported-package
   importer and country-of-origin declarations;
-- Rule 6(2) consumer-complaint contact details, and conditional Rules 6(7),
-  6(8), 6(10), and 6(10A);
+- Rule 6(2) consumer-complaint contact details, and conditional Rules 6(7)
+  and 6(8);
 - Rule 6(1)(da), introduced by the 2017 amendment, with its other-law guard;
 - Rule 6(11), only when the calling classification layer says it applies and
   neither statutory proviso removes the need for it.
