@@ -18,6 +18,9 @@ class ComplianceEngineTests(unittest.TestCase):
             "MRP ₹20/- (INCL OF ALL TAXES)",
             "MRP R.S. 20.00 (INCLUSIVE OF ALL TAXES)",
             "MRP R S 20,00 (INCL. OF ALL TAXES)",
+            "MRP ₹ 50.00 (INCL., OF ALL TAXES)",
+            "MRP ₹ 50.00 (I N C L OF ALL TAXES)",
+            "MRP Rs: 50.00 (INCL: OF ALL TAXES)",
         ):
             package = ExtractedPackage(
                 mrp=present(declaration),

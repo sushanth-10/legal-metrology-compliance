@@ -17,7 +17,19 @@ from .models import AssessmentTarget, ExtractedPackage, FieldObservation, Observ
 # variants without accepting a bare number as an MRP declaration.
 _INDIAN_CURRENCY = re.compile(r"(?:\u20b9|r\s*\.?\s*s|rs|inr)\s*\.?\s*[:.]?\s*\d+(?:[.,]\d{1,2})?", re.I)
 _MRP_LABEL = re.compile(r"(?:mrp|maximum\s+retail\s+price|retail\s+sale\s+price)", re.I)
-_ALL_TAXES = re.compile(r"(?:inclusive\s+of\s+all\s+taxes|incl\.?\s*(?:of\s*)?all\s+taxes)", re.I)
+# Package printing and OCR can insert harmless punctuation or spaces in the
+# tax-inclusive phrase, e.g. ``INCL., OF ALL TAXES`` or ``I N C L OF ALL
+# TAXES``. Keep the phrase itself mandatory; only tolerate separators between
+# its words and abbreviations.
+_ALL_TAXES = re.compile(
+    r"(?:"
+    r"i\s*n\s*c\s*l\s*\.?\s*[,.:;/-]?\s*"
+    r"(?:o\s*f\s*[,.:;/-]?\s*)?a\s*l\s*l\s+taxes"
+    r"|"
+    r"inclusive\s*[,.:;/-]?\s*(?:o\s*f\s*[,.:;/-]?\s*)?a\s*l\s*l\s+taxes"
+    r")",
+    re.I,
+)
 _DATE = re.compile(r"(?:\d{1,2}[/-]\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*[-,]?\s*\d{2,4})", re.I)
 _WEIGHT = re.compile(r"\d+(?:\.\d+)?\s*(?:mg|g|kg)\b", re.I)
 _VOLUME = re.compile(r"\d+(?:\.\d+)?\s*(?:ml|l)\b", re.I)
@@ -210,10 +222,10 @@ def mrp_check(package: ExtractedPackage) -> RuleOutcome:
 
 def is_valid_mrp_declaration(text: str) -> bool:
     """Return whether extracted MRP text contains all required components."""
-    # OCR commonly inserts spaces into ``R.S.``/``INCL.`` or uses a comma
-    # as the decimal separator. Normalize only those harmless forms; the MRP
-    # label, currency amount, and inclusive-tax wording remain independently
-    # required.
+    # OCR commonly inserts spaces/punctuation into ``R.S.``/``INCL.`` or uses
+    # a comma as the decimal separator. The regular expressions tolerate only
+    # those harmless forms; the MRP label, currency amount, and inclusive-tax
+    # wording remain independently required.
     normalized = " ".join(text.replace("\u00a0", " ").split())
     return bool(_MRP_LABEL.search(normalized) and _INDIAN_CURRENCY.search(normalized) and _ALL_TAXES.search(normalized))
 
