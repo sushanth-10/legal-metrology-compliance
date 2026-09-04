@@ -39,7 +39,7 @@ from compliance_engine import (
 )
 from compliance_engine.rules import is_valid_mrp_declaration
 from database import STORAGE_DIR, connect, create_token, create_user, init_db, iso_datetime, json_value, new_id, user_from_token, verify_password
-from pdf_reports import create_certificate_pdf, create_pdf
+from pdf_reports import CERTIFICATE_LAYOUT_VERSION, create_certificate_pdf, create_pdf
 
 app = FastAPI(title="NIRIKSHA Package Compliance API")
 
@@ -1020,9 +1020,14 @@ def _normalize_status(value: Any) -> ObservationState:
     status_map = {
         "VISIBLE": ObservationState.PRESENT,
         "PRESENT": ObservationState.PRESENT,
+        "DETECTED": ObservationState.PRESENT,
+        "FOUND": ObservationState.PRESENT,
+        "COMPLIANT": ObservationState.PRESENT,
         "CONFIRMED_ABSENT": ObservationState.CONFIRMED_ABSENT,
+        "ABSENT": ObservationState.CONFIRMED_ABSENT,
         "NOT_VISIBLE": ObservationState.NOT_VISIBLE,
         "NOT_VISIBLE_IN_IMAGE": ObservationState.NOT_VISIBLE,
+        "NOT_FOUND": ObservationState.NOT_VISIBLE,
         "UNREADABLE": ObservationState.UNREADABLE,
         "UNREADABLE_TEXT": ObservationState.UNREADABLE,
         "NOT_ASSESSED": ObservationState.NOT_ASSESSED,
@@ -1031,37 +1036,167 @@ def _normalize_status(value: Any) -> ObservationState:
     return status_map.get(normalized, ObservationState.NOT_ASSESSED)
 
 
-def _structured_extraction(payload: Any) -> dict[str, Any]:
-    """Find the richest nested extraction object without inventing fields."""
-    candidates: list[tuple[int, int, dict[str, Any]]] = []
+_EXTRACTION_FIELD_ALIASES = {
+    "generic_name", "product_name", "common_generic_product_name",
+    "manufacturer", "manufacturer_details", "manufactured_by", "marketed_by",
+    "packer", "packer_details", "packed_by", "importer", "importer_details", "imported_by",
+    "country_of_origin", "country_of_origin_details", "origin",
+    "net_quantity", "net_qty", "net_weight", "net_wt",
+    "mrp", "maximum_retail_price", "retail_sale_price",
+    "unit_sale_price", "unit_price", "usp",
+    "manufacture_or_pack_or_import_date", "pack_date", "date_declaration",
+    "manufacture_date", "manufacturing_date", "mfd", "packed_date",
+    "best_before_or_use_by", "best_before", "use_by", "expiry", "expiry_date",
+    "consumer_care", "consumer_care_details", "consumer_contact", "customer_care",
+    "component_names_and_quantities", "multipack_details",
+    "gm_mark", "genetically_modified_mark",
+    "dietary_origin_mark", "vegetarian_non_vegetarian_mark", "veg_nonveg_mark",
+}
 
-    def walk(value: Any, depth: int = 0) -> None:
+
+def _normalized_key(value: Any) -> str:
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value).strip())
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _field_key(value: Any) -> str:
+    key = _normalized_key(value)
+    aliases = {
+        "mrp_retail_sale_price_inclusive_of_all_taxes": "mrp",
+        "maximum_retail_price_inclusive_of_all_taxes": "mrp",
+        "manufacturer_packer_importer_name_and_address": "manufacturer_details",
+        "manufacturer_packer_importer_name_address": "manufacturer_details",
+        "net_quantity_and_unit": "net_quantity",
+        "country_of_origin_manufacture_assembly": "country_of_origin",
+        "manufacture_pack_import_month_and_year": "manufacture_or_pack_or_import_date",
+        "best_before_use_by_expiry_date": "best_before_or_use_by",
+        "unit_sale_price_declaration": "unit_sale_price",
+        "consumer_complaint_contact": "consumer_care",
+        "gm_food_declaration": "gm_mark",
+        "vegetarian_non_vegetarian_origin_mark": "dietary_origin_mark",
+        "names_and_quantities_of_products_in_a_multipack": "component_names_and_quantities",
+    }
+    return aliases.get(key, key)
+
+
+def _field_map_score(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    return sum(1 for key in value if _field_key(key) in _EXTRACTION_FIELD_ALIASES)
+
+
+def _field_records_from_list(value: Any) -> dict[str, Any] | None:
+    """Convert a named field-record list to the same local map we expect.
+
+    This only reshapes records that already contain a field name/key; it does
+    not infer a declaration from arbitrary text.
+    """
+    if not isinstance(value, list):
+        return None
+    records: dict[str, Any] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized = {_normalized_key(key): child for key, child in item.items()}
+        raw_name = normalized.get("field") or normalized.get("field_name") or normalized.get("name") or normalized.get("key")
+        if raw_name is None:
+            continue
+        record = dict(item)
+        for metadata_key in ("field", "field_name", "name", "key"):
+            record.pop(metadata_key, None)
+            for original_key in list(record):
+                if _normalized_key(original_key) == metadata_key:
+                    record.pop(original_key, None)
+        records[str(raw_name)] = record
+    return records or None
+
+
+def _has_structured_extraction(payload: Any) -> bool:
+    return _has_selected_extraction(_structured_extraction(payload))
+
+
+def _has_selected_extraction(selected: Any) -> bool:
+    fields = selected.get("fields") if isinstance(selected, dict) else None
+    return _field_map_score(fields) > 0 if isinstance(fields, dict) else _field_map_score(selected) > 0
+
+
+def _structured_extraction(payload: Any) -> dict[str, Any]:
+    """Find the richest extraction object without inventing declaration data.
+
+    The requested Gemini schema uses ``{"fields": {...}}``. In practice a
+    valid model response can also be wrapped in ``data``/``result``, return the
+    field map directly, or put the JSON response inside a string envelope. All
+    of those are presentation differences; this function only unwraps them.
+    """
+    candidates: list[tuple[int, int, int, dict[str, Any]]] = []
+
+    def walk(value: Any, depth: int = 0, inherited_context: Any = None, inherited_coverage: Any = None) -> None:
         if isinstance(value, dict):
-            fields = value.get("fields")
+            normalized = {_normalized_key(key): child for key, child in value.items()}
+            context = normalized.get("context", inherited_context)
+            coverage = normalized.get("image_coverage", inherited_coverage)
+            fields = normalized.get("fields")
+            if not fields:
+                fields = normalized.get("extracted_fields") or normalized.get("observations")
+            fields_from_list = _field_records_from_list(fields)
+            if fields_from_list is not None:
+                fields = fields_from_list
             if isinstance(fields, dict):
-                candidates.append((len(fields), -depth, value))
+                score = _field_map_score(fields)
+                candidates.append((score, len(fields), -depth, {**value, "fields": fields, "context": context, "image_coverage": coverage}))
+            else:
+                score = _field_map_score(value)
+                if score:
+                    candidates.append((score, score, -depth, {**value, "context": context, "image_coverage": coverage}))
             for child in value.values():
                 if isinstance(child, (dict, list)):
-                    walk(child, depth + 1)
+                    walk(child, depth + 1, context, coverage)
+                elif isinstance(child, str) and child.lstrip().startswith(("{", "[")):
+                    try:
+                        decoded = json.loads(child)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    walk(decoded, depth + 1, context, coverage)
         elif isinstance(value, list):
+            fields = _field_records_from_list(value)
+            if fields is not None:
+                candidates.append((_field_map_score(fields), len(fields), -depth, {"fields": fields, "context": inherited_context, "image_coverage": inherited_coverage}))
             for child in value:
-                walk(child, depth + 1)
+                walk(child, depth + 1, inherited_context, inherited_coverage)
 
     walk(payload)
     if not candidates:
         return payload if isinstance(payload, dict) else {}
-    # Prefer the object containing the most extracted fields. The depth tie
-    # breaker keeps the outer structured object when both are equivalent.
-    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+    # Prefer the object containing the most recognized fields. The field-count
+    # and depth tie breakers keep the complete extraction when envelopes are
+    # nested or when a response contains an unrelated small object.
+    return max(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
 def _field_from_record(field_name: str, record: Any) -> FieldObservation:
     if not isinstance(record, dict):
+        if isinstance(record, (str, int, float)) and str(record).strip():
+            return FieldObservation(state=ObservationState.PRESENT, value=str(record), evidence=str(record))
         return FieldObservation(state=ObservationState.NOT_ASSESSED)
-    state = _normalize_status(record.get("status") or record.get("visibility") or record.get("state"))
-    value = record.get("value")
-    confidence = record.get("confidence")
-    evidence = record.get("evidence") or record.get("source_text") or ""
+    normalized_record = {_normalized_key(key): value for key, value in record.items()}
+    raw_state = normalized_record.get("status") or normalized_record.get("visibility") or normalized_record.get("state")
+    value = normalized_record.get("value")
+    if value is None:
+        value = normalized_record.get("text") or normalized_record.get("extracted_text")
+    confidence = normalized_record.get("confidence")
+    evidence = normalized_record.get("evidence") or normalized_record.get("source_text") or ""
+    if raw_state is None and "present" in normalized_record:
+        raw_state = "PRESENT" if normalized_record["present"] is True else "NOT_VISIBLE"
+    elif raw_state is None and (value not in (None, "") or evidence):
+        # A named record with an extracted value is already evidence of a
+        # visible observation even when a compact array response omits the
+        # redundant status property.
+        raw_state = "PRESENT"
+    state = _normalize_status(raw_state)
+    if value is not None and not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+    if not isinstance(evidence, str):
+        evidence = json.dumps(evidence, ensure_ascii=False) if isinstance(evidence, (dict, list)) else str(evidence)
     # Gemini may return a parsed numeric MRP in ``value`` while keeping the
     # complete printed declaration in ``evidence``. Preserve that existing
     # declaration so Rule 6(1)(e) validates the evidence actually shown.
@@ -1078,7 +1213,7 @@ def _field_from_record(field_name: str, record: Any) -> FieldObservation:
         evidence = f"{evidence} :: {bbox}"
     source_image: int | None = None
     for key in ("source_image_index", "sourceImageIndex", "image_index", "source_image"):
-        raw_index = record.get(key)
+        raw_index = normalized_record.get(_normalized_key(key))
         if isinstance(raw_index, dict):
             for nested_key in ("index", "image_index", "source_image_index"):
                 if raw_index.get(nested_key) is not None:
@@ -1095,14 +1230,18 @@ def _field_from_record(field_name: str, record: Any) -> FieldObservation:
             source_image = parsed_index
             break
     if source_image is None:
-        raw_number = record.get("source_image_number") or record.get("sourceImageNumber")
+        raw_number = normalized_record.get("source_image_number")
         try:
             parsed_number = int(raw_number) if raw_number is not None else None
         except (TypeError, ValueError):
             parsed_number = None
         if parsed_number is not None and parsed_number > 0:
             source_image = parsed_number - 1
-    source_image_ref = record.get("source_image_ref") or record.get("sourceImageRef") or record.get("source_path")
+    source_image_ref = normalized_record.get("source_image_ref") or normalized_record.get("source_path")
+    if source_image_ref is None:
+        raw_source = normalized_record.get("source_image")
+        if isinstance(raw_source, str) and not re.search(r"(?:image|img)[ _-]*\d+", raw_source, re.I):
+            source_image_ref = raw_source
     normalized_bbox = bbox if isinstance(bbox, dict) and bbox else None
     try:
         normalized_confidence = float(confidence) if confidence is not None else None
@@ -1171,57 +1310,90 @@ def _extract_package(payload: dict[str, Any]) -> ExtractedPackage:
     # Some Gemini responses include one or more harmless outer envelopes
     # around the extraction object. Select the richest existing ``fields``
     # object; do not infer or synthesize any declaration values.
-    payload = _structured_extraction(payload)
-    fields = payload.get("fields", {})
+    if not isinstance(payload.get("fields"), dict) and not _field_map_score(payload):
+        payload = _structured_extraction(payload)
+    fields = payload.get("fields")
+    if not isinstance(fields, dict):
+        # Some responses omit the harmless ``fields`` envelope and return the
+        # recognized declaration records directly at the selected object.
+        fields = payload if _field_map_score(payload) else {}
+    normalized_fields = {_field_key(key): value for key, value in fields.items()}
     context = payload.get("context", {})
+    if not isinstance(context, dict):
+        context = {}
+    normalized_context = {_normalized_key(key): value for key, value in context.items()}
     package_context = PackageContext(
-        is_imported=_as_bool(context.get("is_imported")),
-        may_become_unfit_for_human_consumption=_as_bool(context.get("may_become_unfit_for_human_consumption")),
-        date_requirement_governed_by_other_law=_as_bool(context.get("date_requirement_governed_by_other_law")),
-        unit_sale_price_required=_as_bool(context.get("unit_sale_price_required")),
-        retail_sale_price_equals_unit_sale_price=_as_bool(context.get("retail_sale_price_equals_unit_sale_price")),
-        unit_sale_price_governed_by_other_law=_as_bool(context.get("unit_sale_price_governed_by_other_law")),
-        quantity_basis=_map_quantity_basis(context.get("quantity_basis")),
-        contains_multiple_products=_as_bool(context.get("contains_multiple_products")),
-        is_genetically_modified_food=_as_bool(context.get("is_genetically_modified_food")),
-        requires_vegetarian_origin_mark=_as_bool(context.get("requires_vegetarian_origin_mark")),
+        is_imported=_as_bool(normalized_context.get("is_imported")),
+        may_become_unfit_for_human_consumption=_as_bool(normalized_context.get("may_become_unfit_for_human_consumption")),
+        date_requirement_governed_by_other_law=_as_bool(normalized_context.get("date_requirement_governed_by_other_law")),
+        unit_sale_price_required=_as_bool(normalized_context.get("unit_sale_price_required")),
+        retail_sale_price_equals_unit_sale_price=_as_bool(normalized_context.get("retail_sale_price_equals_unit_sale_price")),
+        unit_sale_price_governed_by_other_law=_as_bool(normalized_context.get("unit_sale_price_governed_by_other_law")),
+        quantity_basis=_map_quantity_basis(normalized_context.get("quantity_basis")),
+        contains_multiple_products=_as_bool(normalized_context.get("contains_multiple_products")),
+        is_genetically_modified_food=_as_bool(normalized_context.get("is_genetically_modified_food")),
+        requires_vegetarian_origin_mark=_as_bool(normalized_context.get("requires_vegetarian_origin_mark")),
         # Missing coverage data must never be treated as proof that every
         # relevant label surface was inspected.
-        inspected_relevant_label_surfaces=_as_bool(context.get("inspected_relevant_label_surfaces")) is True,
+        inspected_relevant_label_surfaces=_as_bool(normalized_context.get("inspected_relevant_label_surfaces")) is True,
     )
 
     mapping = {
         "generic_name": "generic_name",
         "product_name": "generic_name",
+        "common_generic_product_name": "generic_name",
         "manufacturer": "manufacturer",
         "manufacturer_details": "manufacturer",
+        "manufactured_by": "manufacturer",
+        "marketed_by": "manufacturer",
         "packer": "packer",
         "packer_details": "packer",
+        "packed_by": "packer",
         "importer": "importer",
         "importer_details": "importer",
+        "imported_by": "importer",
         "country_of_origin": "country_of_origin",
         "country_of_origin_details": "country_of_origin",
+        "origin": "country_of_origin",
         "net_quantity": "net_quantity",
+        "net_qty": "net_quantity",
+        "net_weight": "net_quantity",
+        "net_wt": "net_quantity",
         "mrp": "mrp",
+        "maximum_retail_price": "mrp",
+        "retail_sale_price": "mrp",
         "unit_sale_price": "unit_sale_price",
+        "unit_price": "unit_sale_price",
+        "usp": "unit_sale_price",
         "manufacture_or_pack_or_import_date": "manufacture_or_pack_or_import_date",
         "pack_date": "manufacture_or_pack_or_import_date",
         "date_declaration": "manufacture_or_pack_or_import_date",
+        "manufacture_date": "manufacture_or_pack_or_import_date",
+        "manufacturing_date": "manufacture_or_pack_or_import_date",
+        "mfd": "manufacture_or_pack_or_import_date",
+        "packed_date": "manufacture_or_pack_or_import_date",
         "best_before_or_use_by": "best_before_or_use_by",
         "best_before": "best_before_or_use_by",
         "use_by": "best_before_or_use_by",
+        "expiry": "best_before_or_use_by",
+        "expiry_date": "best_before_or_use_by",
         "consumer_care": "consumer_care",
         "consumer_care_details": "consumer_care",
+        "consumer_contact": "consumer_care",
+        "customer_care": "consumer_care",
         "component_names_and_quantities": "component_names_and_quantities",
+        "multipack_details": "component_names_and_quantities",
         "gm_mark": "gm_mark",
+        "genetically_modified_mark": "gm_mark",
         "dietary_origin_mark": "dietary_origin_mark",
         "vegetarian_non_vegetarian_mark": "dietary_origin_mark",
+        "veg_nonveg_mark": "dietary_origin_mark",
     }
 
     candidates: dict[str, list[FieldObservation]] = {}
     for dto_key, package_key in mapping.items():
-        if dto_key in fields:
-            candidates.setdefault(package_key, []).append(_field_from_record(dto_key, fields[dto_key]))
+        if dto_key in normalized_fields:
+            candidates.setdefault(package_key, []).append(_field_from_record(dto_key, normalized_fields[dto_key]))
     extra_fields = {key: _best_observation(value) for key, value in candidates.items()}
 
     package = ExtractedPackage(
@@ -1985,7 +2157,15 @@ async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile
     logger.info("[PERF] Gemini request: %.2fs", time.perf_counter() - gemini_started)
     parse_started = time.perf_counter()
     rules_started = time.perf_counter()
-    package = _extract_package(payload)
+    structured_payload = _structured_extraction(payload)
+    if not _has_selected_extraction(structured_payload):
+        logger.error("[SCAN] Gemini returned JSON without any recognized package fields; refusing to persist an empty assessment.")
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini returned no structured package fields. No empty scan was saved; please check the model response and try again.",
+        )
+    package = _extract_package(structured_payload)
+    image_coverage = structured_payload.get("image_coverage") or payload.get("image_coverage", {})
     result = ComplianceEngine().evaluate(package)
     logger.info("[PERF] Gemini response parsing: %.2fs", time.perf_counter() - parse_started)
     logger.info("[PERF] Rules: %.2fs", time.perf_counter() - rules_started)
@@ -2017,7 +2197,7 @@ async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile
             with connection.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO scans (scan_id, user_id, organization_id, product_name, overall_status, image_ref, image_metadata, extracted_data, compliance_score) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)",
-                    (scan_id, user["id"], user.get("organization_id"), package.generic_name.value or "Product name unavailable", result.overall_status.value, "", json.dumps({"image_count": len(loaded)}), json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": payload.get("image_coverage", {})}), compliance_score),
+                    (scan_id, user["id"], user.get("organization_id"), package.generic_name.value or "Product name unavailable", result.overall_status.value, "", json.dumps({"image_count": len(loaded)}), json.dumps({"fields": {name: _field_record(getattr(package, name)) for name in ("generic_name", "manufacturer", "packer", "importer", "country_of_origin", "net_quantity", "mrp", "unit_sale_price", "manufacture_or_pack_or_import_date", "best_before_or_use_by", "consumer_care", "component_names_and_quantities", "gm_mark", "dietary_origin_mark")}, "context": json_value(dataclasses.asdict(package.context)), "image_coverage": image_coverage}), compliance_score),
                 )
                 for outcome in result.outcomes:
                     cursor.execute(
@@ -2039,7 +2219,7 @@ async def scan_images(background_tasks: BackgroundTasks, images: list[UploadFile
     return {
         "overall_status": result.overall_status.value,
         "checks": checks,
-        "coverage": payload.get("image_coverage", {"overall": "UNKNOWN", "minimum_required_surfaces_covered": False, "notes": ""}),
+        "coverage": image_coverage or {"overall": "UNKNOWN", "minimum_required_surfaces_covered": False, "notes": ""},
         "summary": {"total_checks": len(checks), "compliant": sum(1 for item in checks if item["status"] == "COMPLIANT"), "violations": sum(1 for item in checks if item["status"] == "VIOLATION"), "review": sum(1 for item in checks if item["status"] in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED", "NOT_APPLICABLE"})},
         "scan": scan,
         "report_id": None,
@@ -2408,6 +2588,7 @@ async def generate_certificate(scan_id: str, request: Request, authorization: st
                 metadata = {
                     "document_type": "COMPLIANCE_CERTIFICATE",
                     "generator": "reportlab",
+                    "layout_version": CERTIFICATE_LAYOUT_VERSION,
                     "compliance_score": payload["compliance_score"],
                     "verification_url": verification_url,
                     "eligibility_reason": reason,
@@ -2448,13 +2629,51 @@ async def verify_certificate(certificate_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/certificates/{certificate_id}/pdf")
-async def download_certificate(certificate_id: str, authorization: str | None = Header(default=None)):
+async def download_certificate(certificate_id: str, request: Request, authorization: str | None = Header(default=None)):
     user = _organization_or_403(authorization)
     row = _certificate_row(certificate_id, user)
     if not row:
         raise HTTPException(status_code=404, detail="Certificate not found.")
     from fastapi.responses import FileResponse
     path = Path(row["pdf_path"]).resolve()
+    if STORAGE_DIR not in path.parents:
+        raise HTTPException(status_code=404, detail="The certificate PDF file is no longer available.")
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+    if metadata.get("layout_version") != CERTIFICATE_LAYOUT_VERSION:
+        # Existing certificates were generated with the previous layout. On
+        # an explicit download, refresh only the PDF from persisted scan data;
+        # the scan request and its compliance result remain untouched.
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                checks = _result_rows(cursor, row["scan_id"])
+                applicable_checks = [item for item in checks if str(item.get("status") or "").upper() != "NOT_APPLICABLE"]
+                verification_url = metadata.get("verification_url") or _certificate_verification_url(request, row["report_id"])
+                payload = {
+                    "certificate_id": row["report_id"],
+                    "scan_id": row["scan_id"],
+                    "scanned_at": row.get("scanned_at"),
+                    "generated_at": row.get("generated_at"),
+                    "product_name": row.get("product_name"),
+                    "extracted_data": row.get("extracted_data") or {},
+                    "compliance_score": int(row.get("compliance_score") or _calculate_compliance_score(checks)),
+                    "summary": {
+                        "total": len(applicable_checks),
+                        "compliant": sum(1 for item in applicable_checks if item.get("status") == "COMPLIANT"),
+                        "violations": sum(1 for item in applicable_checks if item.get("status") == "VIOLATION"),
+                        "review": sum(1 for item in applicable_checks if item.get("status") in {"UNABLE_TO_VERIFY", "OFFICER_REVIEW_REQUIRED"}),
+                    },
+                    "verification_url": verification_url,
+                }
+                path.parent.mkdir(parents=True, exist_ok=True)
+                create_certificate_pdf(payload, path)
+                metadata = {**metadata, "generator": "reportlab", "layout_version": CERTIFICATE_LAYOUT_VERSION, "verification_url": verification_url}
+                cursor.execute("UPDATE reports SET metadata = %s::jsonb WHERE report_id = %s", (json.dumps(metadata), row["report_id"]))
+                connection.commit()
     if not path.is_file() or STORAGE_DIR not in path.parents:
         raise HTTPException(status_code=404, detail="The certificate PDF file is no longer available.")
     return FileResponse(path, media_type="application/pdf", filename=f"{certificate_id}.pdf")

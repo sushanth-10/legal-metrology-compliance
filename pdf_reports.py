@@ -14,7 +14,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.graphics.barcode.qr import QrCodeWidget
 from reportlab.graphics.shapes import Drawing
-from reportlab.platypus import BaseDocTemplate, Frame, Image, PageTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import BaseDocTemplate, Flowable, Frame, Image, PageTemplate, Paragraph, Spacer, Table, TableStyle
 
 
 NAVY = colors.HexColor("#123b66")
@@ -29,6 +29,7 @@ RED = colors.HexColor("#c62828")
 AMBER = colors.HexColor("#b36b00")
 DEFAULT_STYLE = ParagraphStyle("DefaultValue", fontName="Helvetica", fontSize=8.2, leading=10.2, textColor=TEXT)
 LOGO_PATH = Path(__file__).resolve().parent / "project" / "assets" / "niriksha-logo.jpeg"
+CERTIFICATE_LAYOUT_VERSION = "template-3-formal-v2"
 
 
 def _raw(value: Any, fallback: str = "Not available") -> str:
@@ -384,8 +385,54 @@ def _certificate_qr(value: str, size: float = 28 * mm) -> Drawing:
     return drawing
 
 
+class _ComplianceBadge(Flowable):
+    """Formal green compliance badge with lightweight laurel decoration."""
+
+    def __init__(self, width: float = 112 * mm, height: float = 22 * mm) -> None:
+        super().__init__()
+        self.width = width
+        self.height = height
+
+    def wrap(self, available_width: float, available_height: float) -> tuple[float, float]:
+        return min(self.width, available_width), self.height
+
+    def draw(self) -> None:
+        canvas = self.canv
+        center = self.width / 2
+        pill_width = 82 * mm
+        pill_height = 13 * mm
+        pill_x = center - pill_width / 2
+        pill_y = (self.height - pill_height) / 2
+        green = colors.HexColor("#19733d")
+
+        canvas.setFillColor(green)
+        canvas.roundRect(pill_x, pill_y, pill_width, pill_height, pill_height / 2, fill=1, stroke=0)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 16)
+        canvas.drawCentredString(center, pill_y + 4.1 * mm, "COMPLIANT")
+
+        # Small line-and-leaf marks echo the reference certificate without
+        # requiring a fabricated seal or an external image asset.
+        canvas.setStrokeColor(green)
+        canvas.setLineWidth(1.1)
+        for side in (-1, 1):
+            base_x = center + side * (pill_width / 2 + 6 * mm)
+            canvas.arc(
+                base_x - (side < 0) * 8 * mm,
+                3 * mm,
+                base_x + (side > 0) * 8 * mm,
+                self.height - 3 * mm,
+                70 if side < 0 else 110,
+                220 if side < 0 else 140,
+            )
+            for index in range(4):
+                y = 5 * mm + index * 3.6 * mm
+                leaf_x = base_x + side * (2.4 * mm + index * 0.35 * mm)
+                canvas.ellipse(leaf_x - 1.8 * mm, y, leaf_x + 1.8 * mm, y + 2.4 * mm, fill=0, stroke=1)
+
+
 def create_certificate_pdf(certificate: dict[str, Any], output_path: Path) -> None:
-    """Create a formal assessment certificate from a persisted eligible scan."""
+    """Create the formal Template 3 certificate from a persisted eligible scan."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     page_width, page_height = A4
     margin = 16 * mm
@@ -393,17 +440,21 @@ def create_certificate_pdf(certificate: dict[str, Any], output_path: Path) -> No
     gold = colors.HexColor("#b58a3a")
     cream = colors.HexColor("#fffaf0")
     green = colors.HexColor("#19733d")
+    pale_gold = colors.HexColor("#f5ecd9")
 
     base = getSampleStyleSheet()
-    title = ParagraphStyle("CertificateTitle", parent=base["Title"], fontName="Helvetica-Bold", fontSize=16, leading=20, textColor=NAVY, alignment=TA_CENTER, spaceAfter=3)
-    subtitle = ParagraphStyle("CertificateSubtitle", parent=base["BodyText"], fontName="Helvetica", fontSize=9.2, leading=12, textColor=MUTED, alignment=TA_CENTER)
-    heading = ParagraphStyle("CertificateHeading", parent=base["Heading2"], fontName="Helvetica-Bold", fontSize=10, leading=12, textColor=NAVY, alignment=TA_CENTER)
-    label = ParagraphStyle("CertificateLabel", parent=base["BodyText"], fontName="Helvetica-Bold", fontSize=8, leading=10, textColor=NAVY)
-    value = ParagraphStyle("CertificateValue", parent=base["BodyText"], fontName="Helvetica", fontSize=9, leading=12, textColor=TEXT)
+    title = ParagraphStyle("CertificateTitle", parent=base["Title"], fontName="Times-Bold", fontSize=19, leading=22, textColor=colors.HexColor("#2e2116"), alignment=TA_CENTER, spaceAfter=3)
+    subtitle = ParagraphStyle("CertificateSubtitle", parent=base["BodyText"], fontName="Helvetica", fontSize=8.8, leading=11, textColor=TEXT, alignment=TA_CENTER)
+    brand_name = ParagraphStyle("CertificateBrandName", parent=base["Heading2"], fontName="Helvetica-Bold", fontSize=16, leading=18, textColor=NAVY, alignment=TA_CENTER)
+    brand_tagline = ParagraphStyle("CertificateBrandTagline", parent=base["BodyText"], fontName="Helvetica", fontSize=7.2, leading=8.5, textColor=GREEN, alignment=TA_CENTER)
+    label = ParagraphStyle("CertificateLabel", parent=base["BodyText"], fontName="Helvetica-Bold", fontSize=8.3, leading=10, textColor=NAVY)
+    value = ParagraphStyle("CertificateValue", parent=base["BodyText"], fontName="Helvetica", fontSize=8.8, leading=11, textColor=TEXT)
     centered = ParagraphStyle("CertificateCentered", parent=value, alignment=TA_CENTER)
-    score_style = ParagraphStyle("CertificateScore", parent=base["Title"], fontName="Helvetica-Bold", fontSize=24, leading=27, textColor=green, alignment=TA_CENTER)
-    status_style = ParagraphStyle("CertificateStatus", parent=base["BodyText"], fontName="Helvetica-Bold", fontSize=12, leading=15, textColor=colors.white, alignment=TA_CENTER)
-    small = ParagraphStyle("CertificateSmall", parent=value, fontSize=7.5, leading=9.5, textColor=MUTED)
+    score_style = ParagraphStyle("CertificateScore", parent=base["Title"], fontName="Helvetica-Bold", fontSize=19, leading=22, textColor=green, alignment=TA_CENTER)
+    small = ParagraphStyle("CertificateSmall", parent=value, fontSize=7.2, leading=9, textColor=MUTED)
+    footer_brand = ParagraphStyle("CertificateFooterBrand", parent=base["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, textColor=NAVY)
+    footer_tagline = ParagraphStyle("CertificateFooterTagline", parent=small, fontSize=7, leading=8.5, textColor=MUTED)
+    disclaimer = ParagraphStyle("CertificateDisclaimer", parent=small, fontSize=7.3, leading=9.2, textColor=MUTED, alignment=TA_CENTER)
 
     class CertificateDocument(BaseDocTemplate):
         pass
@@ -420,37 +471,42 @@ def create_certificate_pdf(certificate: dict[str, Any], output_path: Path) -> No
         canvas.setFillColor(cream)
         canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
         canvas.setStrokeColor(gold)
-        canvas.setLineWidth(1.5)
+        canvas.setLineWidth(1.3)
         canvas.rect(8 * mm, 8 * mm, page_width - 16 * mm, page_height - 16 * mm, fill=0, stroke=1)
-        canvas.setLineWidth(0.6)
+        canvas.setLineWidth(0.55)
         canvas.rect(11 * mm, 11 * mm, page_width - 22 * mm, page_height - 22 * mm, fill=0, stroke=1)
-        canvas.setFont("Helvetica", 7.5)
+        # Simple corner ornaments provide the formal frame treatment without
+        # imitating a government seal or authorization mark.
+        canvas.setLineWidth(0.8)
+        for x, y, sx, sy in ((13 * mm, page_height - 13 * mm, 1, -1), (page_width - 13 * mm, page_height - 13 * mm, -1, -1), (13 * mm, 13 * mm, 1, 1), (page_width - 13 * mm, 13 * mm, -1, 1)):
+            canvas.line(x, y, x + sx * 6 * mm, y)
+            canvas.line(x, y, x, y + sy * 6 * mm)
+            canvas.line(x, y, x + sx * 4 * mm, y + sy * 4 * mm)
+        canvas.setFont("Helvetica", 7)
         canvas.setFillColor(MUTED)
-        canvas.drawCentredString(page_width / 2, 9.5 * mm, "Automatically generated by NIRIKSHA · Compliance assessment assistance")
+        canvas.drawCentredString(page_width / 2, 14 * mm, "Automatically generated by NIRIKSHA - compliance assessment assistance")
         canvas.restoreState()
 
     document.addPageTemplates([PageTemplate(id="certificate", frames=[frame], onPage=draw_certificate_page)])
     story: list[Any] = []
 
-    logo = _scaled_image(LOGO_PATH.read_bytes(), 22 * mm, 22 * mm) if LOGO_PATH.is_file() and LOGO_PATH.stat().st_size else None
-    logo_cell = logo or _paragraph("NIRIKSHA", heading)
-    brand = [Paragraph("NIRIKSHA", ParagraphStyle("CertificateBrand", parent=heading, fontSize=14, alignment=TA_LEFT)), Paragraph("AI-POWERED PRODUCT COMPLIANCE", ParagraphStyle("CertificateBrandSub", parent=small, textColor=BLUE, fontName="Helvetica-Bold", alignment=TA_LEFT))]
-    header = Table([[logo_cell, brand, Paragraph("COMPLIANCE ASSESSMENT CERTIFICATE", title)]], colWidths=[26 * mm, 51 * mm, content_width - 77 * mm], style=TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    logo = _scaled_image(LOGO_PATH.read_bytes(), 26 * mm, 26 * mm) if LOGO_PATH.is_file() and LOGO_PATH.stat().st_size else None
+    certificate_number = _paragraph(certificate.get("certificate_id"), small)
+    top_meta = Table([[certificate_number]], colWidths=[42 * mm], style=TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.extend([header, Spacer(1, 7)])
-    story.append(Table([[Paragraph("NIRIKSHA COMPLIANCE ASSESSMENT", heading)]], colWidths=[content_width], style=TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f1e4c7")), ("BOX", (0, 0), (-1, -1), 0.8, gold),
-        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-    ])))
-    story.append(Spacer(1, 8))
-
-    metadata = [
-        [_paragraph("Certificate Number", label), _paragraph(certificate.get("certificate_id")), _paragraph("Assessment Date", label), _paragraph(_format_datetime(certificate.get("scanned_at")))],
-        [_paragraph("Assessment Reference", label), _paragraph(certificate.get("scan_id")), _paragraph("Generated Date", label), _paragraph(_format_datetime(certificate.get("generated_at")))],
-    ]
-    story.extend([_bordered_table(metadata, [34 * mm, 57 * mm, 34 * mm, 57 * mm]), Spacer(1, 9)])
+    top_meta_with_label = [Paragraph("Certificate No.", label), top_meta]
+    logo_block = logo or Paragraph("NIRIKSHA", brand_name)
+    brand_block = [Paragraph("NIRIKSHA", brand_name), Paragraph("SAFE LABELS. STRONGER INDIA.", brand_tagline)]
+    header = Table([[logo_block, brand_block, top_meta_with_label]], colWidths=[31 * mm, content_width - 73 * mm, 42 * mm], style=TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 1), ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.extend([header, Spacer(1, 5), Paragraph("COMPLIANCE ASSESSMENT CERTIFICATE", title), Spacer(1, 3)])
+    story.append(Paragraph("This is to certify that the product listed below has been assessed using NIRIKSHA's AI-enabled compliance system and has been found to be", subtitle))
+    story.extend([Spacer(1, 5), _ComplianceBadge(), Spacer(1, 5)])
 
     extracted = certificate.get("extracted_data") or {}
     fields = extracted.get("fields") if isinstance(extracted, dict) else {}
@@ -464,37 +520,52 @@ def create_certificate_pdf(certificate: dict[str, Any], output_path: Path) -> No
     if brand == "Not available":
         brand = "Not separately extracted"
     details = [
-        [_paragraph("Product Name", label), _paragraph(product_name), _paragraph("Brand", label), _paragraph(brand)],
-        [_paragraph("Manufacturer / Packer", label), _paragraph(manufacturer), _paragraph("Net Quantity", label), _paragraph(_field_value(fields, "net_quantity"))],
-        [_paragraph("MRP", label), _paragraph(_field_value(fields, "mrp")), _paragraph("Assessment Reference", label), _paragraph(certificate.get("scan_id"))],
+        [_paragraph("Product Name", label), _paragraph(product_name)],
+        [_paragraph("Brand", label), _paragraph(brand)],
+        [_paragraph("Manufacturer / Packer", label), _paragraph(manufacturer)],
+        [_paragraph("Net Quantity", label), _paragraph(_field_value(fields, "net_quantity"))],
+        [_paragraph("MRP", label), _paragraph(_field_value(fields, "mrp"))],
+        [_paragraph("Assessment Date", label), _paragraph(_format_datetime(certificate.get("scanned_at")))],
+        [_paragraph("Assessment Reference", label), _paragraph(certificate.get("scan_id"))],
     ]
-    story.extend([_section("ASSESSMENT DETAILS", ParagraphStyle("CertificateSection", parent=heading, textColor=colors.white, alignment=TA_LEFT), content_width), _bordered_table(details, [34 * mm, 57 * mm, 34 * mm, 57 * mm]), Spacer(1, 10)])
+    details_table = Table(details, colWidths=[48 * mm, content_width - 48 * mm], style=TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.7, gold), ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#dfd1b4")),
+        ("BACKGROUND", (0, 0), (0, -1), pale_gold), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 4.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
+    ]))
+    story.extend([details_table, Spacer(1, 6)])
 
     score = certificate.get("compliance_score", 0)
-    status_table = Table([
-        [Paragraph(f"{_escape(score)} / 100", score_style), Paragraph("COMPLIANT", status_style)],
-        [_paragraph("Compliance Score", heading), _paragraph("Final deterministic assessment status", centered)],
-    ], colWidths=[content_width / 2, content_width / 2], style=TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.9, gold), ("INNERGRID", (0, 0), (-1, -1), 0.45, gold),
-        ("BACKGROUND", (0, 0), (0, 0), colors.white), ("BACKGROUND", (1, 0), (1, 0), green), ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#f5f0e4")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    story.extend([status_table, Spacer(1, 10)])
-
     summary = certificate.get("summary") or {}
     summary_text = f"The submitted package-label evidence was assessed as COMPLIANT. {summary.get('compliant', 0)} of {summary.get('total', 0)} applicable checks were verified, with no mandatory violations or unresolved verification items."
-    story.extend([_section("COMPLIANCE SUMMARY", ParagraphStyle("CertificateSummarySection", parent=heading, textColor=colors.white, alignment=TA_LEFT), content_width), _bordered_table([[_paragraph(summary_text, value)]], [content_width]), Spacer(1, 10)])
-
-    verification_url = str(certificate.get("verification_url") or "")
-    qr_content = _certificate_qr(verification_url) if verification_url else _paragraph("Verification URL unavailable", small)
-    qr_table = Table([[qr_content, [Paragraph("Scan to Verify Certificate", heading), Spacer(1, 3), _paragraph("Verification displays only the certificate ID, product, assessment date, score, and status.", small)]]], colWidths=[45 * mm, content_width - 45 * mm], style=TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.8, gold), ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fffdf7")),
+    score_summary = Table([
+        [Paragraph(f"{_escape(score)} / 100", score_style), _paragraph("Assessed as COMPLIANT based on the product-label evidence submitted to NIRIKSHA.", centered)],
+        [_paragraph("Compliance Score", label), _paragraph(summary_text, small)],
+    ], colWidths=[43 * mm, content_width - 43 * mm], style=TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.7, gold), ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#dfd1b4")),
+        ("BACKGROUND", (0, 0), (0, 0), colors.white), ("BACKGROUND", (0, 1), (0, 1), pale_gold),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (0, 0), "CENTER"),
         ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-        ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
-    story.extend([qr_table, Spacer(1, 12)])
-    disclaimer = "This certificate is an automated NIRIKSHA compliance assessment based on submitted product-label evidence. It does not constitute statutory government approval, legal metrology certification, or a final enforcement determination."
-    story.extend([_section("DISCLAIMER", ParagraphStyle("CertificateDisclaimerSection", parent=heading, textColor=colors.white, alignment=TA_LEFT), content_width), _bordered_table([[_paragraph(disclaimer, small)]], [content_width])])
+    story.extend([score_summary, Spacer(1, 7)])
+
+    verification_url = str(certificate.get("verification_url") or "")
+    qr_content = _certificate_qr(verification_url, 28 * mm) if verification_url else _paragraph("Verification URL unavailable", small)
+    footer_left = [Paragraph("NIRIKSHA", footer_brand), Paragraph("An AI-enabled initiative for clearer product-label compliance.", footer_tagline)]
+    qr_right = [qr_content, Paragraph("Scan to Verify Certificate", label)]
+    verification_table = Table([[footer_left, qr_right]], colWidths=[content_width - 45 * mm, 45 * mm], style=TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (0, 0), "LEFT"), ("ALIGN", (1, 0), (1, 0), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.extend([verification_table, Spacer(1, 5)])
+    disclaimer_text = "This certificate is an automated NIRIKSHA compliance assessment based on submitted product-label evidence. It does not constitute statutory government approval, legal metrology certification, or a final enforcement determination."
+    story.extend([
+        Table([[Paragraph("DISCLAIMER", label)]], colWidths=[content_width], style=TableStyle([
+            ("LINEABOVE", (0, 0), (-1, -1), 0.7, gold), ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ])),
+        Paragraph(disclaimer_text, disclaimer),
+    ])
     document.build(story)

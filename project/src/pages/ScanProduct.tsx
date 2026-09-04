@@ -45,7 +45,7 @@ function normalizeScan(scan: Scan): Scan {
   };
 }
 
-type Check = { id: string; label: string; status: Status; value: string; reference: string; explanation: string; sourceImage?: number | null; sourceImageRef?: string | null };
+type Check = { id: string; label: string; status: Status; value: string; reference: string; explanation: string; sourceImage?: number | string | null; sourceImageRef?: string | null };
 
 const steps = ['Images uploaded', 'Image quality checked', 'Reading product label', 'Extracting product information', 'Checking mandatory declarations', 'Applying Legal Metrology rules', 'Generating compliance report'];
 
@@ -85,7 +85,20 @@ function Processing({ mode, results, back }: { mode: Mode; results: () => void; 
 
 function CheckRow({ check, images }: { check: Check; images: Array<ImageItem | null> }) {
   const [open, setOpen] = useState(false); const [issue, setIssue] = useState<'missing' | 'no-label' | 'other' | null>(null); const [note, setNote] = useState(''); const [saved, setSaved] = useState(false);
-  const source = typeof check.sourceImage === 'number' && check.sourceImage >= 0 ? images[check.sourceImage] : null;
+  const parsedSourceIndex = typeof check.sourceImage === 'number'
+    ? check.sourceImage
+    : typeof check.sourceImage === 'string' && /^\d+$/.test(check.sourceImage.trim())
+    ? Number(check.sourceImage)
+    : null;
+  const sourceByIndex = parsedSourceIndex !== null && parsedSourceIndex >= 0 ? images[parsedSourceIndex] : null;
+  const sourceRef = check.sourceImageRef?.trim();
+  const sourceByReference = sourceRef
+    ? images.find((image) => image && (image.id === sourceRef || image.name === sourceRef || image.url === sourceRef))
+      || (/^(?:https?:|data:|\/api\/uploads\/)/i.test(sourceRef)
+        ? { id: `source-${check.id}`, name: 'Evidence source', url: sourceRef.startsWith('/') ? `${apiBaseUrl()}${sourceRef}` : sourceRef }
+        : null)
+    : null;
+  const source = sourceByIndex || sourceByReference;
   return <article className="border border-ink-200 rounded-xl overflow-hidden"><button onClick={() => setOpen(!open)} className="w-full text-left p-4 flex items-start gap-3 hover:bg-ink-50"><Badge status={check.status} /><div className="flex-1 min-w-0"><p className="font-semibold text-ink-900">{check.label}</p><p className="text-sm text-ink-500 mt-0.5 truncate">{check.value}</p></div>{open ? <ChevronUp className="w-4 h-4 text-ink-500 mt-1" /> : <ChevronDown className="w-4 h-4 text-ink-500 mt-1" />}</button>{open && <div className="border-t border-ink-100 p-4 bg-ink-50/50 grid md:grid-cols-[1fr_220px] gap-4"><div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Applicable requirement</p><p className="text-sm text-ink-700 mt-1">{check.reference}</p><p className="text-xs font-semibold uppercase tracking-wide text-ink-500 mt-4">Explanation</p><p className="text-sm text-ink-700 mt-1 leading-6">{check.explanation}</p>{check.id === 'mrp' && check.status === 'UNABLE_TO_VERIFY' && <div className="mt-4 rounded-xl border border-warning-200 bg-warning-50 p-3"><p className="text-sm font-semibold text-warning-800">Tell us what you observed</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => { setIssue('missing'); setSaved(false); }} className="btn-secondary py-2">MRP appears to be missing</button><button onClick={() => { setIssue('no-label'); setSaved(false); }} className="btn-secondary py-2">No label/declaration visible</button><button onClick={() => { setIssue('other'); setSaved(false); }} className="btn-secondary py-2">Other issue</button></div>{issue === 'other' && <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} className="input mt-3 resize-y" placeholder="Describe the issue for future review…" />}{issue && <button disabled={issue === 'other' && !note.trim()} onClick={() => setSaved(true)} className="btn-primary mt-3 py-2">Continue</button>}{saved && <p className="text-xs text-success-700 font-medium mt-3">Observation recorded for future review. Status is unchanged.</p>}</div>}</div><div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500 mb-2">Evidence / source</p>{source ? <img src={source.url} alt={'Evidence for ' + check.label} className="w-full aspect-[4/3] object-cover rounded-lg border border-ink-200" /> : <div className="aspect-[4/3] rounded-lg border border-dashed border-ink-300 bg-white grid place-items-center p-3 text-center text-xs text-ink-500">No source image established</div>}</div></div>}</article>;
 }
 

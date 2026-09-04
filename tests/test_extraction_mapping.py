@@ -1,7 +1,7 @@
 import unittest
 
 from compliance_engine import ObservationState
-from server import _extract_package, _field_record, _result_rows
+from server import _extract_package, _field_record, _has_structured_extraction, _result_rows
 
 
 class ExtractionMappingTests(unittest.TestCase):
@@ -108,6 +108,43 @@ class ExtractionMappingTests(unittest.TestCase):
 
         self.assertEqual(package.mrp.value, declaration)
         self.assertEqual(package.mrp.source_image, 1)
+
+    def test_flat_camel_case_extraction_is_mapped_without_ai_or_ocr(self) -> None:
+        package = _extract_package({
+            "context": {"inspectedRelevantLabelSurfaces": True, "quantityBasis": "WEIGHT"},
+            "genericName": {"status": "DETECTED", "value": "BISCUITS", "evidence": "BISCUITS", "sourceImageIndex": 0},
+            "mrp": {"status": "VISIBLE", "value": "MRP Rs. 50/- (INCL. OF ALL TAXES)", "evidence": "MRP Rs. 50/- (INCL. OF ALL TAXES)", "sourceImageIndex": 1},
+        })
+
+        self.assertEqual(package.generic_name.value, "BISCUITS")
+        self.assertEqual(package.generic_name.source_image, 0)
+        self.assertEqual(package.mrp.source_image, 1)
+        self.assertTrue(package.context.inspected_relevant_label_surfaces)
+
+    def test_serialized_nested_extraction_is_unwrapped(self) -> None:
+        payload = {
+            "data": '{"fields":{"manufacturer_details":{"status":"VISIBLE","value":"Acme Pvt. Ltd., Delhi 110001","evidence":"Acme Pvt. Ltd., Delhi 110001","source_image_number":1}},"context":{"inspected_relevant_label_surfaces":true}}'
+        }
+
+        self.assertTrue(_has_structured_extraction(payload))
+        package = _extract_package(payload)
+        self.assertEqual(package.manufacturer.value, "Acme Pvt. Ltd., Delhi 110001")
+        self.assertEqual(package.manufacturer.source_image, 0)
+
+    def test_named_field_list_is_mapped_without_inventing_values(self) -> None:
+        package = _extract_package({
+            "observations": [
+                {"name": "MRP/retail sale price inclusive of all taxes", "status": "VISIBLE", "value": "MRP Rs. 50/- (INCL. OF ALL TAXES)"},
+                {"field": "net_quantity_and_unit", "value": "Net Weight 200 g"},
+            ],
+            "context": {"quantity_basis": "WEIGHT"},
+        })
+
+        self.assertEqual(package.mrp.value, "MRP Rs. 50/- (INCL. OF ALL TAXES)")
+        self.assertEqual(package.net_quantity.value, "Net Weight 200 g")
+
+    def test_unstructured_model_json_is_not_treated_as_a_valid_extraction(self) -> None:
+        self.assertFalse(_has_structured_extraction({"status": "ok", "summary": "done"}))
 
 
 if __name__ == "__main__":
